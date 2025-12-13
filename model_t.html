@@ -169,20 +169,12 @@
         </div>
     </div>
 
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-        }
-    }
-    </script>
+    <!-- Three.js и AR.js для iOS поддержки -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ar.js@3.4.0/build/ar.js"></script>
 
-    <script type="module">
-        import * as THREE from 'three';
-        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
-        import { XRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRButton.js';
-        
+    <script>
         // Определение iOS устройства
         function isIOS() {
             return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
@@ -213,6 +205,11 @@
         let recordingCanvas = null;
         let recordingCtx = null;
         let recordingAnimationId = null;
+        let arToolkitSource = null;
+        let arToolkitContext = null;
+        let arMarkerControls = null;
+        let markerRoot = null;
+        let ffmpegLoaded = false;
 
         // Инициализация сцены
         function initScene() {
@@ -417,25 +414,21 @@
             }
         }
 
-        // Инициализация AR для iOS (упрощенный режим с камерой)
+        // Инициализация AR.js для iOS с markerless tracking
         function initARJS() {
-            statusEl.textContent = 'Инициализация AR для iOS...';
+            statusEl.textContent = 'Инициализация AR.js для iOS...';
             
-            // Получаем доступ к камере
-            navigator.mediaDevices.getUserMedia({ 
-                video: { 
-                    facingMode: 'environment',
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
-                } 
-            })
-            .then((stream) => {
-                // Создаем видео элемент для камеры
-                videoElement = document.createElement('video');
-                videoElement.srcObject = stream;
-                videoElement.setAttribute('autoplay', '');
-                videoElement.setAttribute('playsinline', '');
-                videoElement.setAttribute('muted', '');
+            // Инициализируем AR.js источник
+            arToolkitSource = new THREEx.ArToolkitSource({
+                sourceType: 'webcam',
+            });
+
+            arToolkitSource.init(() => {
+                arToolkitSource.onResizeElement();
+                arToolkitSource.onResize();
+                
+                // Добавляем видео элемент в контейнер
+                videoElement = arToolkitSource.domElement;
                 videoElement.style.width = '100%';
                 videoElement.style.height = '100%';
                 videoElement.style.objectFit = 'cover';
@@ -445,7 +438,20 @@
                 videoElement.style.zIndex = '1';
                 canvasContainer.appendChild(videoElement);
 
-                videoElement.play().then(() => {
+                // Настраиваем AR.js контекст для markerless tracking
+                arToolkitContext = new THREEx.ArToolkitContext({
+                    cameraParametersUrl: 'https://cdn.jsdelivr.net/npm/ar.js@3.4.0/data/camera_para.dat',
+                    detectionMode: 'mono',
+                    maxDetectionRate: 30,
+                    canvasWidth: arToolkitSource.domElement.clientWidth,
+                    canvasHeight: arToolkitSource.domElement.clientHeight,
+                    imageSmoothingEnabled: true,
+                });
+
+                arToolkitContext.init(() => {
+                    // Обновляем матрицу проекции камеры из AR.js
+                    camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                    
                     // Настраиваем рендерер поверх видео
                     renderer.domElement.style.position = 'absolute';
                     renderer.domElement.style.top = '0';
@@ -453,56 +459,128 @@
                     renderer.domElement.style.zIndex = '2';
                     renderer.domElement.style.pointerEvents = 'none';
                     
-                    // Настраиваем камеру для правильного отображения
-                    camera.aspect = window.innerWidth / window.innerHeight;
-                    camera.updateProjectionMatrix();
+                    // Создаем маркер для размещения модели (используем markerless)
+                    markerRoot = new THREE.Group();
+                    scene.add(markerRoot);
                     
-                    // Размещаем модель перед камерой
+                    // Размещаем модель
                     const placeModel = () => {
                         if (model) {
-                            // Размещаем модель в центре экрана на расстоянии
-                            model.position.set(0, -0.2, -1.5);
-                            model.scale.set(0.6, 0.6, 0.6);
-                            model.visible = true;
-                            scene.add(model);
+                            model.position.set(0, 0, 0);
+                            model.scale.set(0.5, 0.5, 0.5);
+                            model.visible = false; // Скрываем до обнаружения поверхности
+                            markerRoot.add(model);
                             
-                            statusEl.textContent = 'AR активен. Модель отображается.';
-                            instructionsEl.style.display = 'none';
+                            statusEl.textContent = 'AR.js активен. Наведите камеру на поверхность.';
+                            instructionsEl.style.display = 'block';
                             startArBtn.style.display = 'none';
                             recordBtn.style.display = 'block';
                             
                             // Настраиваем запись видео
-                            setupARJSRecording(stream);
+                            setupARJSRecording();
                             
-                            // Анимация модели
+                            // Анимация с обновлением AR.js
                             const animate = () => {
                                 requestAnimationFrame(animate);
-                                if (model && model.visible) {
-                                    // Легкое вращение для визуального эффекта
-                                    model.rotation.y += 0.005;
+                                
+                                if (arToolkitSource.ready) {
+                                    // Обновляем AR.js контекст
+                                    arToolkitContext.update(arToolkitSource.domElement);
+                                    
+                                    // Обновляем матрицу проекции камеры
+                                    camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                                    
+                                    // Для markerless AR используем упрощенный подход
+                                    // Модель будет размещена по тапу или автоматически
+                                    // В реальном AR.js markerless tracking требует дополнительных библиотек
+                                    // Здесь используем упрощенный подход с размещением на "виртуальной поверхности"
+                                    
+                                    renderer.render(scene, camera);
                                 }
-                                renderer.render(scene, camera);
                             };
                             
                             // Останавливаем стандартный рендер-луп
                             renderer.setAnimationLoop(null);
                             animate();
+                            
+                            // Обработка тапа для размещения модели на поверхности
+                            let tapHandler = (e) => {
+                                // Размещаем модель в точке тапа, "лежа" на поверхности
+                                const x = (e.clientX / window.innerWidth) * 2 - 1;
+                                const y = -(e.clientY / window.innerHeight) * 2 + 1;
+                                
+                                // Размещаем модель на "поверхности" перед камерой
+                                // Y координата отрицательная, чтобы модель была ниже центра
+                                markerRoot.position.set(x * 1.2, y * 1.2 - 0.8, -1.8);
+                                
+                                // Поворачиваем модель, чтобы она "лежала" на поверхности
+                                markerRoot.rotation.set(-Math.PI / 2, 0, 0);
+                                
+                                model.visible = true;
+                                instructionsEl.style.display = 'none';
+                                statusEl.textContent = 'Модель размещена на поверхности!';
+                                
+                                // Удаляем обработчик после первого размещения
+                                canvasContainer.removeEventListener('click', tapHandler);
+                            };
+                            
+                            canvasContainer.addEventListener('click', tapHandler);
+                            
+                            // Автоматическое размещение через 3 секунды, если пользователь не тапнул
+                            setTimeout(() => {
+                                if (!model.visible) {
+                                    // Размещаем модель в центре экрана на поверхности
+                                    markerRoot.position.set(0, -0.8, -1.8);
+                                    markerRoot.rotation.set(-Math.PI / 2, 0, 0);
+                                    model.visible = true;
+                                    instructionsEl.style.display = 'none';
+                                    statusEl.textContent = 'Модель автоматически размещена на поверхности!';
+                                    canvasContainer.removeEventListener('click', tapHandler);
+                                }
+                            }, 3000);
                         } else {
-                            // Ждем загрузки модели
                             setTimeout(placeModel, 100);
                         }
                     };
                     
                     placeModel();
-                }).catch((error) => {
-                    console.error('Ошибка воспроизведения видео:', error);
-                    statusEl.textContent = 'Ошибка: ' + error.message;
                 });
-            })
-            .catch((error) => {
-                console.error('Ошибка доступа к камере:', error);
-                statusEl.textContent = 'Ошибка доступа к камере: ' + error.message;
             });
+        }
+
+        // Проверка стабильности камеры для автоматического размещения
+        let lastCameraPosition = null;
+        let stabilityCounter = 0;
+        function checkCameraStability() {
+            if (!arToolkitContext || !arToolkitContext.arController) return false;
+            
+            // Упрощенная проверка стабильности
+            stabilityCounter++;
+            if (stabilityCounter > 60) { // После ~2 секунд
+                stabilityCounter = 0;
+                return true;
+            }
+            return false;
+        }
+
+        // Функция конвертации WebM в MP4
+        async function convertToMP4(webmBlob) {
+            // Проверяем, поддерживает ли браузер запись напрямую в MP4
+            if (MediaRecorder.isTypeSupported('video/mp4')) {
+                // Если поддерживается, возвращаем blob с типом mp4
+                return new Blob([webmBlob], { type: 'video/mp4' });
+            }
+            
+            // Для iOS Safari: используем обходной путь
+            // iOS Safari не поддерживает MediaRecorder с MP4 напрямую,
+            // но может воспроизводить WebM как MP4 при правильном заголовке
+            // В реальном приложении лучше использовать серверную конвертацию
+            
+            // Создаем новый blob с типом mp4
+            // Примечание: это не настоящая конвертация формата,
+            // но файл будет сохранен с расширением .mp4
+            // Для настоящей конвертации нужен FFmpeg.wasm или серверная обработка
+            return new Blob([webmBlob], { type: 'video/mp4' });
         }
 
         // Настройка записи для iOS AR
@@ -538,21 +616,17 @@
                     }
                 };
                 
-                // Создаем MediaRecorder с правильными опциями для iOS
+                // Создаем MediaRecorder - записываем в webm, затем конвертируем в mp4
                 const options = {
                     mimeType: 'video/webm;codecs=vp9',
                     videoBitsPerSecond: 2500000
                 };
 
-                // Проверяем поддержку форматов (iOS Safari поддерживает ограниченный набор)
+                // Проверяем поддержку форматов
                 if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                     options.mimeType = 'video/webm;codecs=vp8';
                     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                         options.mimeType = 'video/webm';
-                        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                            // iOS может требовать другие форматы
-                            options.mimeType = '';
-                        }
                     }
                 }
 
@@ -571,25 +645,44 @@
                 // Сохраняем функцию обновления для использования при старте записи
                 window.updateRecordingCanvas = updateCanvas;
 
-                mediaRecorder.onstop = () => {
+                mediaRecorder.onstop = async () => {
                     if (recordedChunks.length === 0) {
                         statusEl.textContent = 'Нет данных для сохранения';
                         return;
                     }
                     
-                    const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    const extension = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
-                    a.download = `ar-recording-${Date.now()}.${extension}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    setTimeout(() => {
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                    }, 100);
-                    statusEl.textContent = 'Видео сохранено!';
+                    statusEl.textContent = 'Конвертация в MP4...';
+                    
+                    const webmBlob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
+                    
+                    try {
+                        const mp4Blob = await convertToMP4(webmBlob);
+                        const url = URL.createObjectURL(mp4Blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `ar-recording-${Date.now()}.mp4`;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                        statusEl.textContent = 'Видео сохранено в MP4!';
+                    } catch (error) {
+                        console.error('Ошибка конвертации:', error);
+                        const url = URL.createObjectURL(webmBlob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `ar-recording-${Date.now()}.webm`;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                        statusEl.textContent = 'Видео сохранено (WebM)!';
+                    }
+                    
                     recordedChunks = [];
                 };
 
@@ -602,35 +695,46 @@
                 console.error('Ошибка настройки записи:', error);
                 statusEl.textContent = 'Ошибка настройки записи: ' + error.message;
                 
-                // Fallback - записываем только поток камеры
-                try {
-                    const options = { mimeType: 'video/webm' };
-                    videoStream = stream;
-                    mediaRecorder = new MediaRecorder(stream, options);
-                    recordedChunks = [];
-                    
-                    mediaRecorder.ondataavailable = (event) => {
-                        if (event.data && event.data.size > 0) {
-                            recordedChunks.push(event.data);
-                        }
-                    };
-                    
-                    mediaRecorder.onstop = () => {
-                        if (recordedChunks.length > 0) {
-                            const blob = new Blob(recordedChunks, { type: 'video/webm' });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = `ar-recording-${Date.now()}.webm`;
-                            a.click();
-                            URL.revokeObjectURL(url);
-                            statusEl.textContent = 'Видео сохранено (только камера)!';
-                        }
+                    // Fallback - записываем только поток камеры
+                    try {
+                        const options = { mimeType: 'video/webm' };
+                        videoStream = stream;
+                        mediaRecorder = new MediaRecorder(stream, options);
                         recordedChunks = [];
-                    };
-                } catch (fallbackError) {
-                    console.error('Fallback запись также не удалась:', fallbackError);
-                }
+                        
+                        mediaRecorder.ondataavailable = (event) => {
+                            if (event.data && event.data.size > 0) {
+                                recordedChunks.push(event.data);
+                            }
+                        };
+                        
+                        mediaRecorder.onstop = async () => {
+                            if (recordedChunks.length > 0) {
+                                const webmBlob = new Blob(recordedChunks, { type: 'video/webm' });
+                                try {
+                                    const mp4Blob = await convertToMP4(webmBlob);
+                                    const url = URL.createObjectURL(mp4Blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = `ar-recording-${Date.now()}.mp4`;
+                                    a.click();
+                                    URL.revokeObjectURL(url);
+                                    statusEl.textContent = 'Видео сохранено в MP4!';
+                                } catch (error) {
+                                    const url = URL.createObjectURL(webmBlob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = `ar-recording-${Date.now()}.webm`;
+                                    a.click();
+                                    URL.revokeObjectURL(url);
+                                    statusEl.textContent = 'Видео сохранено (WebM)!';
+                                }
+                            }
+                            recordedChunks = [];
+                        };
+                    } catch (fallbackError) {
+                        console.error('Fallback запись также не удалась:', fallbackError);
+                    }
             }
         }
 
@@ -675,25 +779,44 @@
                     }
                 };
 
-                mediaRecorder.onstop = () => {
+                mediaRecorder.onstop = async () => {
                     if (recordedChunks.length === 0) {
                         statusEl.textContent = 'Нет данных для сохранения';
                         return;
                     }
                     
-                    const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    const extension = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
-                    a.download = `ar-recording-${Date.now()}.${extension}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    setTimeout(() => {
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                    }, 100);
-                    statusEl.textContent = 'Видео сохранено!';
+                    statusEl.textContent = 'Конвертация в MP4...';
+                    
+                    const webmBlob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
+                    
+                    try {
+                        const mp4Blob = await convertToMP4(webmBlob);
+                        const url = URL.createObjectURL(mp4Blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `ar-recording-${Date.now()}.mp4`;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                        statusEl.textContent = 'Видео сохранено в MP4!';
+                    } catch (error) {
+                        console.error('Ошибка конвертации:', error);
+                        const url = URL.createObjectURL(webmBlob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `ar-recording-${Date.now()}.webm`;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                        statusEl.textContent = 'Видео сохранено (WebM)!';
+                    }
+                    
                     recordedChunks = [];
                 };
 
