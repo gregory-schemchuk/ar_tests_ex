@@ -205,7 +205,13 @@
             // Сначала пробуем через importmap (если поддерживается)
             try {
                 THREE = await import('three');
-                THREEx = await import('threex');
+
+                if (typeof THREEx === 'undefined') {
+                statusEl.textContent = 'Ошибка: AR.js не загружен. Попробуйте обновить страницу.';
+                console.error('THREEx не определен. AR.js не загружен.');
+                return;
+                //THREEx = await import('threex');
+                
                 // Three.js экспортирует как namespace, проверяем структуру
                 if (THREE && !THREE.Scene && THREE.default) {
                     THREE = THREE.default;
