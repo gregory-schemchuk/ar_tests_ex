@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Камера с 3D Моделью</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            pointer-events: auto;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 16px;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #start-ar-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        #start-ar-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        #record-btn {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(245, 87, 108, 0.4);
+            display: none;
+        }
+
+        #record-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(245, 87, 108, 0.6);
+        }
+
+        #record-btn.recording {
+            background: linear-gradient(135deg, #ff0000 0%, #cc0000 100%);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.7;
+            }
+        }
+
+        #status {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px 30px;
+            border-radius: 30px;
+            font-size: 14px;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+        }
+
+        #instructions {
+            position: absolute;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 15px;
+            max-width: 400px;
+            text-align: center;
+            font-size: 14px;
+            line-height: 1.6;
+            pointer-events: auto;
+            backdrop-filter: blur(10px);
+            display: none;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            pointer-events: auto;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="canvas-container"></div>
+        <div id="ui-overlay">
+            <div id="status">Инициализация...</div>
+            <div id="instructions">
+                Наведите камеру на горизонтальную поверхность. Модель появится автоматически.
+            </div>
+            <div class="controls">
+                <button id="start-ar-btn">Запустить AR</button>
+                <button id="record-btn">Начать запись</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+        import { XRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRButton.js';
+
+        const container = document.getElementById('container');
+        const canvasContainer = document.getElementById('canvas-container');
+        const statusEl = document.getElementById('status');
+        const instructionsEl = document.getElementById('instructions');
+        const startArBtn = document.getElementById('start-ar-btn');
+        const recordBtn = document.getElementById('record-btn');
+
+        let scene, camera, renderer, controller, model;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+        let isRecording = false;
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let videoStream = null;
+
+        // Инициализация сцены
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = null; // Прозрачный фон для AR
+
+            // Камера
+            camera = new THREE.PerspectiveCamera(
+                70,
+                window.innerWidth / window.innerHeight,
+                0.01,
+                20
+            );
+
+            // Рендерер
+            renderer = new THREE.WebGLRenderer({
+                antialias: true,
+                alpha: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            renderer.shadowMap.enabled = true;
+            canvasContainer.appendChild(renderer.domElement);
+
+            // Освещение
+            const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+            light.position.set(0.5, 1, 0.25);
+            scene.add(light);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            directionalLight.position.set(0, 1, 0);
+            scene.add(directionalLight);
+
+            // Загрузка модели
+            loadModel();
+
+            // Обработка контроллера
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect);
+            scene.add(controller);
+
+            // Анимация
+            renderer.setAnimationLoop(render);
+
+            // Обработка изменения размера окна
+            window.addEventListener('resize', onWindowResize);
+
+            // Проверка поддержки WebXR
+            if (navigator.xr) {
+                navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+                    if (supported) {
+                        statusEl.textContent = 'WebXR AR поддерживается. Нажмите "Запустить AR"';
+                        startArBtn.style.display = 'block';
+                    } else {
+                        statusEl.textContent = 'WebXR AR не поддерживается. Используем альтернативный режим.';
+                        initFallbackAR();
+                    }
+                });
+            } else {
+                statusEl.textContent = 'WebXR не поддерживается. Используем альтернативный режим.';
+                initFallbackAR();
+            }
+        }
+
+        // Загрузка 3D модели
+        function loadModel() {
+            const loader = new GLTFLoader();
+            statusEl.textContent = 'Загрузка модели...';
+
+            loader.load(
+                'tt1.glb',
+                (gltf) => {
+                    model = gltf.scene;
+                    model.scale.set(1, 1, 1);
+                    model.visible = false;
+                    scene.add(model);
+                    statusEl.textContent = 'Модель загружена. Готово к использованию.';
+                },
+                (progress) => {
+                    const percent = (progress.loaded / progress.total * 100).toFixed(0);
+                    statusEl.textContent = `Загрузка модели: ${percent}%`;
+                },
+                (error) => {
+                    console.error('Ошибка загрузки модели:', error);
+                    statusEl.textContent = 'Ошибка загрузки модели: ' + error.message;
+                }
+            );
+        }
+
+        // Обработка выбора (тап по экрану)
+        function onSelect() {
+            if (!model || !hitTestSource) return;
+
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+            if (hitTestResults.length > 0) {
+                const hit = hitTestResults[0];
+                const pose = hit.getPose(referenceSpace);
+
+                if (pose) {
+                    model.position.setFromMatrixPosition(pose.transform.matrix);
+                    model.quaternion.setFromRotationMatrix(pose.transform.matrix);
+                    model.visible = true;
+                    instructionsEl.style.display = 'none';
+                }
+            }
+        }
+
+        let frame;
+        function render() {
+            if (renderer.xr.isPresenting) {
+                frame = renderer.xr.getFrame();
+                updateHitTestSource(frame);
+                updateModelPosition(frame);
+            }
+            renderer.render(scene, camera);
+        }
+
+        // Обновление источника hit test
+        function updateHitTestSource(frame) {
+            if (!hitTestSourceRequested) {
+                const session = renderer.xr.getSession();
+                session.requestReferenceSpace('viewer').then((referenceSpace) => {
+                    session.requestHitTestSource({ space: referenceSpace }).then((source) => {
+                        hitTestSource = source;
+                    });
+                });
+                hitTestSourceRequested = true;
+            }
+        }
+
+        // Автоматическое размещение модели на поверхности
+        function updateModelPosition(frame) {
+            if (!model || !hitTestSource) return;
+
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+            if (hitTestResults.length > 0) {
+                const hit = hitTestResults[0];
+                const pose = hit.getPose(referenceSpace);
+
+                if (pose) {
+                    // Размещаем модель на поверхности
+                    model.position.setFromMatrixPosition(pose.transform.matrix);
+                    model.quaternion.setFromRotationMatrix(pose.transform.matrix);
+                    
+                    if (!model.visible) {
+                        model.visible = true;
+                        instructionsEl.style.display = 'none';
+                        statusEl.textContent = 'Модель размещена!';
+                    }
+                }
+            } else if (model.visible) {
+                // Если поверхность не найдена, скрываем модель
+                instructionsEl.style.display = 'block';
+            }
+        }
+
+        // Запуск AR сессии
+        async function startARSession() {
+            try {
+                const session = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['local-floor', 'hit-test'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: document.body }
+                });
+
+                session.addEventListener('end', onSessionEnd);
+                await renderer.xr.setSession(session);
+                
+                statusEl.textContent = 'AR активен. Наведите камеру на поверхность.';
+                instructionsEl.style.display = 'block';
+                startArBtn.style.display = 'none';
+                recordBtn.style.display = 'block';
+                
+                // Начало записи видео потока
+                startVideoRecording(session);
+            } catch (error) {
+                console.error('Ошибка запуска AR:', error);
+                statusEl.textContent = 'Ошибка: ' + error.message;
+            }
+        }
+
+        // Запись видео
+        async function startVideoRecording(session) {
+            try {
+                // Получаем видео поток из canvas
+                const canvas = renderer.domElement;
+                
+                // Используем captureStream для записи canvas
+                if (canvas.captureStream) {
+                    videoStream = canvas.captureStream(30); // 30 FPS
+                } else if (canvas.mozCaptureStream) {
+                    videoStream = canvas.mozCaptureStream(30);
+                } else {
+                    console.warn('Canvas captureStream не поддерживается');
+                    return;
+                }
+
+                // Создаем MediaRecorder
+                const options = {
+                    mimeType: 'video/webm;codecs=vp9',
+                    videoBitsPerSecond: 2500000
+                };
+
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm;codecs=vp8';
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options.mimeType = 'video/webm';
+                        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                            options.mimeType = 'video/mp4';
+                        }
+                    }
+                }
+
+                mediaRecorder = new MediaRecorder(videoStream, options);
+                recordedChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    if (recordedChunks.length === 0) {
+                        statusEl.textContent = 'Нет данных для сохранения';
+                        return;
+                    }
+                    
+                    const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const extension = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
+                    a.download = `ar-recording-${Date.now()}.${extension}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    }, 100);
+                    statusEl.textContent = 'Видео сохранено!';
+                    recordedChunks = [];
+                };
+
+                mediaRecorder.onerror = (event) => {
+                    console.error('Ошибка записи:', event);
+                    statusEl.textContent = 'Ошибка записи видео';
+                };
+
+            } catch (error) {
+                console.error('Ошибка записи видео:', error);
+                statusEl.textContent = 'Ошибка настройки записи: ' + error.message;
+            }
+        }
+
+        // Управление записью
+        function toggleRecording() {
+            if (!mediaRecorder && renderer.xr.isPresenting) {
+                // Инициализируем запись если еще не инициализирована
+                const session = renderer.xr.getSession();
+                if (session) {
+                    startVideoRecording(session);
+                    setTimeout(() => toggleRecording(), 500);
+                }
+                return;
+            }
+
+            if (!mediaRecorder) {
+                statusEl.textContent = 'Запись недоступна. Сначала запустите AR.';
+                return;
+            }
+
+            if (!isRecording) {
+                try {
+                    mediaRecorder.start(1000); // Сохраняем данные каждую секунду
+                    isRecording = true;
+                    recordBtn.textContent = 'Остановить запись';
+                    recordBtn.classList.add('recording');
+                    statusEl.textContent = 'Запись начата...';
+                } catch (error) {
+                    console.error('Ошибка начала записи:', error);
+                    statusEl.textContent = 'Ошибка: ' + error.message;
+                }
+            } else {
+                try {
+                    mediaRecorder.stop();
+                    isRecording = false;
+                    recordBtn.textContent = 'Начать запись';
+                    recordBtn.classList.remove('recording');
+                    statusEl.textContent = 'Сохранение видео...';
+                } catch (error) {
+                    console.error('Ошибка остановки записи:', error);
+                    statusEl.textContent = 'Ошибка: ' + error.message;
+                }
+            }
+        }
+
+        // Окончание сессии
+        function onSessionEnd() {
+            hitTestSourceRequested = false;
+            hitTestSource = null;
+            if (model) model.visible = false;
+            startArBtn.style.display = 'block';
+            recordBtn.style.display = 'none';
+            instructionsEl.style.display = 'none';
+            if (isRecording && mediaRecorder) {
+                mediaRecorder.stop();
+                isRecording = false;
+            }
+            statusEl.textContent = 'AR сессия завершена.';
+        }
+
+        // Альтернативный режим (без WebXR)
+        function initFallbackAR() {
+            statusEl.textContent = 'Используется режим без AR. Загрузка камеры...';
+            
+            navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    facingMode: 'environment',
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                } 
+            })
+                .then((stream) => {
+                    // Создаем видео элемент для камеры
+                    const video = document.createElement('video');
+                    video.srcObject = stream;
+                    video.setAttribute('playsinline', '');
+                    video.setAttribute('autoplay', '');
+                    video.setAttribute('muted', '');
+                    video.play();
+                    video.style.width = '100%';
+                    video.style.height = '100%';
+                    video.style.objectFit = 'cover';
+                    video.style.position = 'absolute';
+                    video.style.top = '0';
+                    video.style.left = '0';
+                    video.style.zIndex = '1';
+                    canvasContainer.appendChild(video);
+
+                    // Настраиваем canvas поверх видео
+                    renderer.domElement.style.position = 'absolute';
+                    renderer.domElement.style.top = '0';
+                    renderer.domElement.style.left = '0';
+                    renderer.domElement.style.zIndex = '2';
+                    renderer.domElement.style.pointerEvents = 'none';
+
+                    // Обновляем камеру для правильного отображения
+                    camera.position.set(0, 0, 0);
+                    camera.lookAt(0, 0, -1);
+
+                    // Ждем загрузки модели перед размещением
+                    const checkModel = setInterval(() => {
+                        if (model) {
+                            clearInterval(checkModel);
+                            // Размещаем модель перед камерой
+                            model.position.set(0, -0.3, -1.5);
+                            model.scale.set(0.5, 0.5, 0.5);
+                            model.visible = true;
+                            statusEl.textContent = 'Камера активна. Модель отображается.';
+                            
+                            // Анимация модели
+                            const animate = () => {
+                                if (model && model.visible) {
+                                    model.rotation.y += 0.01;
+                                }
+                                requestAnimationFrame(animate);
+                            };
+                            animate();
+                        }
+                    }, 100);
+
+                    // Запись видео - комбинируем canvas и видео
+                    videoStream = stream;
+                    startArBtn.textContent = 'Начать запись';
+                    startArBtn.onclick = () => {
+                        if (!isRecording) {
+                            // Создаем комбинированный поток
+                            const canvasStream = renderer.domElement.captureStream(30);
+                            const combinedStream = new MediaStream();
+                            
+                            // Добавляем видео трек из камеры
+                            stream.getVideoTracks().forEach(track => {
+                                combinedStream.addTrack(track);
+                            });
+                            
+                            // Добавляем аудио треки если есть
+                            stream.getAudioTracks().forEach(track => {
+                                combinedStream.addTrack(track);
+                            });
+
+                            const options = {
+                                mimeType: 'video/webm;codecs=vp9',
+                                videoBitsPerSecond: 2500000
+                            };
+
+                            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                                options.mimeType = 'video/webm;codecs=vp8';
+                                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                                    options.mimeType = 'video/webm';
+                                }
+                            }
+                            
+                            mediaRecorder = new MediaRecorder(combinedStream, options);
+                            recordedChunks = [];
+                            
+                            mediaRecorder.ondataavailable = (e) => {
+                                if (e.data && e.data.size > 0) {
+                                    recordedChunks.push(e.data);
+                                }
+                            };
+                            
+                            mediaRecorder.onstop = () => {
+                                if (recordedChunks.length === 0) {
+                                    statusEl.textContent = 'Нет данных для сохранения';
+                                    return;
+                                }
+                                
+                                const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                const extension = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
+                                a.download = `ar-recording-${Date.now()}.${extension}`;
+                                document.body.appendChild(a);
+                                a.click();
+                                setTimeout(() => {
+                                    document.body.removeChild(a);
+                                    URL.revokeObjectURL(url);
+                                }, 100);
+                                statusEl.textContent = 'Видео сохранено!';
+                                recordedChunks = [];
+                            };
+                            
+                            mediaRecorder.start(1000);
+                            isRecording = true;
+                            startArBtn.textContent = 'Остановить запись';
+                            startArBtn.classList.add('recording');
+                            statusEl.textContent = 'Запись начата...';
+                        } else {
+                            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                                mediaRecorder.stop();
+                            }
+                            isRecording = false;
+                            startArBtn.textContent = 'Начать запись';
+                            startArBtn.classList.remove('recording');
+                            statusEl.textContent = 'Сохранение видео...';
+                        }
+                    };
+                })
+                .catch((error) => {
+                    statusEl.textContent = 'Ошибка доступа к камере: ' + error.message;
+                    console.error('Ошибка камеры:', error);
+                });
+        }
+
+        // Обработка изменения размера окна
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Обработчики событий
+        startArBtn.addEventListener('click', startARSession);
+        recordBtn.addEventListener('click', toggleRecording);
+
+        // Инициализация
+        initScene();
+    </script>
+</body>
+</html>
+
