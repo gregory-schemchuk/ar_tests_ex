@@ -210,6 +210,8 @@
                     statusEl.textContent = 'Ошибка: AR.js не загружен. Попробуйте обновить страницу.';
                     console.error('THREEx не определен. AR.js не загружен.');
                     return;
+                } else {
+                    console.log("THREEx: ", THREEx);
                 }
                 //THREEx = await import('threex');
                 
