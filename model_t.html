@@ -164,32 +164,32 @@
             </div>
             <div class="controls">
                 <button id="start-ar-btn">Запустить AR</button>
-                <button id="start-ar-btn-test">Запустить AR TEST</button>
                 <button id="record-btn">Начать запись</button>
             </div>
         </div>
     </div>
 
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-        }
-    }
-    </script>
+    <!-- Three.js для iOS поддержки -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
 
-    <script type="module">
-        import * as THREE from 'three';
-        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
-        import { XRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRButton.js';
+    <script>
+        // Определение iOS устройства
+        function isIOS() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        }
+
+        // Определение Android устройства
+        function isAndroid() {
+            return /Android/.test(navigator.userAgent);
+        }
 
         const container = document.getElementById('container');
         const canvasContainer = document.getElementById('canvas-container');
         const statusEl = document.getElementById('status');
         const instructionsEl = document.getElementById('instructions');
         const startArBtn = document.getElementById('start-ar-btn');
-        const startArBtnTEST = document.getElementById('start-ar-btn-test');
         const recordBtn = document.getElementById('record-btn');
 
         let scene, camera, renderer, controller, model;
@@ -199,6 +199,11 @@
         let mediaRecorder = null;
         let recordedChunks = [];
         let videoStream = null;
+        let useARJS = false;
+        let videoElement = null;
+        let recordingCanvas = null;
+        let recordingCtx = null;
+        let recordingAnimationId = null;
 
         // Инициализация сцены
         function initScene() {
@@ -247,22 +252,30 @@
             // Обработка изменения размера окна
             window.addEventListener('resize', onWindowResize);
 
-            // Проверка поддержки WebXR
-            if (navigator.xr) {
+            // Проверка платформы и выбор режима AR
+            if (isIOS()) {
+                // iOS - используем AR.js
+                statusEl.textContent = 'iOS обнаружен. Используем AR.js. Нажмите "Запустить AR"';
+                useARJS = true;
+                startArBtn.style.display = 'block';
+            } else if (navigator.xr) {
+                // Android/Desktop - проверяем WebXR
                 navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
                     if (supported) {
                         statusEl.textContent = 'WebXR AR поддерживается. Нажмите "Запустить AR"';
-                        console.log('WebXR AR поддерживается. Нажмите "Запустить AR"');
+                        useARJS = false;
                         startArBtn.style.display = 'block';
                     } else {
-                        statusEl.textContent = 'WebXR AR не поддерживается. Используем альтернативный режим.';
-                        console.log('WebXR AR не поддерживается. Используем альтернативный режим.');
-                        initFallbackAR();
+                        statusEl.textContent = 'WebXR AR не поддерживается. Используем AR.js.';
+                        useARJS = true;
+                        startArBtn.style.display = 'block';
                     }
                 });
             } else {
-                statusEl.textContent = 'WebXR не поддерживается. Используем альтернативный режим.';
-                initFallbackAR();
+                // Fallback - используем AR.js
+                statusEl.textContent = 'WebXR не поддерживается. Используем AR.js.';
+                useARJS = true;
+                startArBtn.style.display = 'block';
             }
         }
 
@@ -364,26 +377,251 @@
 
         // Запуск AR сессии
         async function startARSession() {
-            try {
-                const session = await navigator.xr.requestSession('immersive-ar', {
-                    requiredFeatures: ['local-floor', 'hit-test'],
-                    optionalFeatures: ['dom-overlay'],
-                    domOverlay: { root: document.body }
-                });
+            if (useARJS) {
+                // Используем AR.js для iOS и fallback
+                initARJS();
+            } else {
+                // Используем WebXR для Android
+                try {
+                    const session = await navigator.xr.requestSession('immersive-ar', {
+                        requiredFeatures: ['local-floor', 'hit-test'],
+                        optionalFeatures: ['dom-overlay'],
+                        domOverlay: { root: document.body }
+                    });
 
-                session.addEventListener('end', onSessionEnd);
-                await renderer.xr.setSession(session);
+                    session.addEventListener('end', onSessionEnd);
+                    await renderer.xr.setSession(session);
+                    
+                    statusEl.textContent = 'AR активен. Наведите камеру на поверхность.';
+                    instructionsEl.style.display = 'block';
+                    startArBtn.style.display = 'none';
+                    recordBtn.style.display = 'block';
+                    
+                    // Начало записи видео потока
+                    startVideoRecording(session);
+                } catch (error) {
+                    console.error('Ошибка запуска AR:', error);
+                    statusEl.textContent = 'Ошибка WebXR: ' + error.message + '. Пробуем AR.js...';
+                    useARJS = true;
+                    initARJS();
+                }
+            }
+        }
+
+        // Инициализация AR для iOS (упрощенный режим с камерой)
+        function initARJS() {
+            statusEl.textContent = 'Инициализация AR для iOS...';
+            
+            // Получаем доступ к камере
+            navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    facingMode: 'environment',
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                } 
+            })
+            .then((stream) => {
+                // Создаем видео элемент для камеры
+                videoElement = document.createElement('video');
+                videoElement.srcObject = stream;
+                videoElement.setAttribute('autoplay', '');
+                videoElement.setAttribute('playsinline', '');
+                videoElement.setAttribute('muted', '');
+                videoElement.style.width = '100%';
+                videoElement.style.height = '100%';
+                videoElement.style.objectFit = 'cover';
+                videoElement.style.position = 'absolute';
+                videoElement.style.top = '0';
+                videoElement.style.left = '0';
+                videoElement.style.zIndex = '1';
+                canvasContainer.appendChild(videoElement);
+
+                videoElement.play().then(() => {
+                    // Настраиваем рендерер поверх видео
+                    renderer.domElement.style.position = 'absolute';
+                    renderer.domElement.style.top = '0';
+                    renderer.domElement.style.left = '0';
+                    renderer.domElement.style.zIndex = '2';
+                    renderer.domElement.style.pointerEvents = 'none';
+                    
+                    // Настраиваем камеру для правильного отображения
+                    camera.aspect = window.innerWidth / window.innerHeight;
+                    camera.updateProjectionMatrix();
+                    
+                    // Размещаем модель перед камерой
+                    const placeModel = () => {
+                        if (model) {
+                            // Размещаем модель в центре экрана на расстоянии
+                            model.position.set(0, -0.2, -1.5);
+                            model.scale.set(0.6, 0.6, 0.6);
+                            model.visible = true;
+                            scene.add(model);
+                            
+                            statusEl.textContent = 'AR активен. Модель отображается.';
+                            instructionsEl.style.display = 'none';
+                            startArBtn.style.display = 'none';
+                            recordBtn.style.display = 'block';
+                            
+                            // Настраиваем запись видео
+                            setupARJSRecording(stream);
+                            
+                            // Анимация модели
+                            const animate = () => {
+                                requestAnimationFrame(animate);
+                                if (model && model.visible) {
+                                    // Легкое вращение для визуального эффекта
+                                    model.rotation.y += 0.005;
+                                }
+                                renderer.render(scene, camera);
+                            };
+                            
+                            // Останавливаем стандартный рендер-луп
+                            renderer.setAnimationLoop(null);
+                            animate();
+                        } else {
+                            // Ждем загрузки модели
+                            setTimeout(placeModel, 100);
+                        }
+                    };
+                    
+                    placeModel();
+                }).catch((error) => {
+                    console.error('Ошибка воспроизведения видео:', error);
+                    statusEl.textContent = 'Ошибка: ' + error.message;
+                });
+            })
+            .catch((error) => {
+                console.error('Ошибка доступа к камере:', error);
+                statusEl.textContent = 'Ошибка доступа к камере: ' + error.message;
+            });
+        }
+
+        // Настройка записи для iOS AR
+        function setupARJSRecording(stream) {
+            try {
+                // Создаем скрытый canvas для комбинирования видео и 3D
+                recordingCanvas = document.createElement('canvas');
+                recordingCanvas.width = window.innerWidth;
+                recordingCanvas.height = window.innerHeight;
+                recordingCanvas.style.display = 'none';
+                document.body.appendChild(recordingCanvas);
+                recordingCtx = recordingCanvas.getContext('2d');
                 
-                statusEl.textContent = 'AR активен. Наведите камеру на поверхность.';
-                instructionsEl.style.display = 'block';
-                startArBtn.style.display = 'none';
-                recordBtn.style.display = 'block';
+                // Функция для комбинирования кадра
+                const drawFrame = () => {
+                    if (videoElement && videoElement.readyState >= 2 && recordingCtx) {
+                        // Рисуем видео камеры
+                        recordingCtx.drawImage(videoElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                        
+                        // Рисуем 3D canvas поверх
+                        recordingCtx.drawImage(renderer.domElement, 0, 0, recordingCanvas.width, recordingCanvas.height);
+                    }
+                };
                 
-                // Начало записи видео потока
-                startVideoRecording(session);
+                // Создаем поток из canvas
+                const canvasStream = recordingCanvas.captureStream(30);
+                
+                // Обновляем canvas каждый кадр
+                const updateCanvas = () => {
+                    if (isRecording && recordingCanvas) {
+                        drawFrame();
+                        recordingAnimationId = requestAnimationFrame(updateCanvas);
+                    }
+                };
+                
+                // Создаем MediaRecorder с правильными опциями для iOS
+                const options = {
+                    mimeType: 'video/webm;codecs=vp9',
+                    videoBitsPerSecond: 2500000
+                };
+
+                // Проверяем поддержку форматов (iOS Safari поддерживает ограниченный набор)
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm;codecs=vp8';
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options.mimeType = 'video/webm';
+                        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                            // iOS может требовать другие форматы
+                            options.mimeType = '';
+                        }
+                    }
+                }
+
+                // Используем canvas stream для записи
+                videoStream = canvasStream;
+                
+                mediaRecorder = new MediaRecorder(canvasStream, options);
+                recordedChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+
+                // Сохраняем функцию обновления для использования при старте записи
+                window.updateRecordingCanvas = updateCanvas;
+
+                mediaRecorder.onstop = () => {
+                    if (recordedChunks.length === 0) {
+                        statusEl.textContent = 'Нет данных для сохранения';
+                        return;
+                    }
+                    
+                    const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const extension = options.mimeType.includes('mp4') ? 'mp4' : 'webm';
+                    a.download = `ar-recording-${Date.now()}.${extension}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    }, 100);
+                    statusEl.textContent = 'Видео сохранено!';
+                    recordedChunks = [];
+                };
+
+                mediaRecorder.onerror = (event) => {
+                    console.error('Ошибка записи:', event);
+                    statusEl.textContent = 'Ошибка записи видео';
+                };
+
             } catch (error) {
-                console.error('Ошибка запуска AR:', error);
-                statusEl.textContent = 'Ошибка: ' + error.message;
+                console.error('Ошибка настройки записи:', error);
+                statusEl.textContent = 'Ошибка настройки записи: ' + error.message;
+                
+                // Fallback - записываем только поток камеры
+                try {
+                    const options = { mimeType: 'video/webm' };
+                    videoStream = stream;
+                    mediaRecorder = new MediaRecorder(stream, options);
+                    recordedChunks = [];
+                    
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data && event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                        }
+                    };
+                    
+                    mediaRecorder.onstop = () => {
+                        if (recordedChunks.length > 0) {
+                            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `ar-recording-${Date.now()}.webm`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                            statusEl.textContent = 'Видео сохранено (только камера)!';
+                        }
+                        recordedChunks = [];
+                    };
+                } catch (fallbackError) {
+                    console.error('Fallback запись также не удалась:', fallbackError);
+                }
             }
         }
 
@@ -485,6 +723,11 @@
                     recordBtn.textContent = 'Остановить запись';
                     recordBtn.classList.add('recording');
                     statusEl.textContent = 'Запись начата...';
+                    
+                    // Запускаем обновление canvas для iOS
+                    if (useARJS && window.updateRecordingCanvas) {
+                        window.updateRecordingCanvas();
+                    }
                 } catch (error) {
                     console.error('Ошибка начала записи:', error);
                     statusEl.textContent = 'Ошибка: ' + error.message;
@@ -496,6 +739,12 @@
                     recordBtn.textContent = 'Начать запись';
                     recordBtn.classList.remove('recording');
                     statusEl.textContent = 'Сохранение видео...';
+                    
+                    // Останавливаем обновление canvas
+                    if (recordingAnimationId) {
+                        cancelAnimationFrame(recordingAnimationId);
+                        recordingAnimationId = null;
+                    }
                 } catch (error) {
                     console.error('Ошибка остановки записи:', error);
                     statusEl.textContent = 'Ошибка: ' + error.message;
@@ -515,6 +764,27 @@
                 mediaRecorder.stop();
                 isRecording = false;
             }
+            
+            // Очистка AR для iOS
+            if (useARJS && videoElement && videoElement.srcObject) {
+                videoElement.srcObject.getTracks().forEach(track => track.stop());
+                if (videoElement.parentNode) {
+                    videoElement.parentNode.removeChild(videoElement);
+                }
+            }
+            
+            // Очистка recording canvas
+            if (recordingCanvas && recordingCanvas.parentNode) {
+                recordingCanvas.parentNode.removeChild(recordingCanvas);
+                recordingCanvas = null;
+                recordingCtx = null;
+            }
+            
+            if (recordingAnimationId) {
+                cancelAnimationFrame(recordingAnimationId);
+                recordingAnimationId = null;
+            }
+            
             statusEl.textContent = 'AR сессия завершена.';
         }
 
@@ -671,7 +941,6 @@
 
         // Обработчики событий
         startArBtn.addEventListener('click', startARSession);
-        startArBtnTEST.addEventListener('click', startARSession);
         recordBtn.addEventListener('click', toggleRecording);
 
         // Инициализация
