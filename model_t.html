@@ -168,24 +168,98 @@
             </div>
         </div>
     </div>
-    
-    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ar.js@3.4.0/build/ar.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ar.js@2.2.2/aframe/build/aframe-ar.min.js"></script>
-    
+
+    <!-- Import map для модульных зависимостей -->
+    <!-- Используем несколько CDN для надежности -->
     <script type="importmap">
     {
         "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            "three": "https://cdn.skypack.dev/three@0.160.0",
+            "three/addons/": "https://cdn.skypack.dev/three@0.160.0/examples/jsm/"
         }
     }
     </script>
+    
+    <!-- Fallback для importmap (если не поддерживается) -->
+    <script>
+        if (!HTMLScriptElement.supports || !HTMLScriptElement.supports('importmap')) {
+            // Загружаем через динамический импорт
+            window.threeModule = 'https://cdn.skypack.dev/three@0.160.0';
+            window.threeAddons = 'https://cdn.skypack.dev/three@0.160.0/examples/jsm/';
+        }
+    </script>
+
+    <!-- AR.js загружаем отдельно, так как он не имеет модульной версии -->
+    <!-- Используем unpkg как альтернативу jsdelivr -->
+    <script src="https://unpkg.com/ar.js@3.4.0/build/ar.js" 
+            onerror="this.onerror=null; this.src='https://cdn.jsdelivr.net/npm/ar.js@3.4.0/build/ar.js'"></script>
 
     <script type="module">
-        import * as THREE from 'three';
-        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
-        import { XRButton } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRButton.js';
+        // Импорты модулей с обработкой ошибок
+        let THREE, GLTFLoader;
+        
+        // Функция для загрузки с fallback
+        async function loadModules() {
+            // Сначала пробуем через importmap (если поддерживается)
+            try {
+                THREE = await import('three');
+                // Three.js экспортирует как namespace, проверяем структуру
+                if (THREE && !THREE.Scene && THREE.default) {
+                    THREE = THREE.default;
+                }
+                
+                GLTFLoader = (await import('three/addons/loaders/GLTFLoader.js')).GLTFLoader;
+                console.log('Модули загружены через importmap');
+                return;
+            } catch (error) {
+                console.warn('Ошибка загрузки через importmap, пробуем прямые URL:', error);
+            }
+            
+            // Fallback: пробуем разные CDN с полными URL
+            const cdnOptions = [
+                { 
+                    three: 'https://cdn.skypack.dev/three@0.160.0', 
+                    loader: 'https://cdn.skypack.dev/three@0.160.0/examples/jsm/loaders/GLTFLoader.js' 
+                },
+                { 
+                    three: 'https://esm.sh/three@0.160.0', 
+                    loader: 'https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js' 
+                },
+                { 
+                    three: 'https://unpkg.com/three@0.160.0/build/three.module.js', 
+                    loader: 'https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js' 
+                }
+            ];
+            
+            for (const cdn of cdnOptions) {
+                try {
+                    const threeModule = await import(cdn.three);
+                    THREE = threeModule.default || threeModule;
+                    if (THREE && !THREE.Scene && THREE.three) {
+                        THREE = THREE.three;
+                    }
+                    
+                    const loaderModule = await import(cdn.loader);
+                    GLTFLoader = loaderModule.GLTFLoader || loaderModule.default?.GLTFLoader;
+                    
+                    if (!GLTFLoader) {
+                        throw new Error('GLTFLoader не найден');
+                    }
+                    
+                    console.log('Модули загружены успешно с CDN:', cdn.three);
+                    return;
+                } catch (error) {
+                    console.warn('Ошибка загрузки с CDN:', cdn.three, error);
+                    if (cdn === cdnOptions[cdnOptions.length - 1]) {
+                        throw new Error('Не удалось загрузить модули ни с одного CDN. Проверьте подключение к интернету.');
+                    }
+                }
+            }
+        }
+        
+        // Загружаем модули перед инициализацией
+        await loadModules();
+
         // Определение iOS устройства
         function isIOS() {
             return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
@@ -428,6 +502,13 @@
         // Инициализация AR.js для iOS с markerless tracking
         function initARJS() {
             statusEl.textContent = 'Инициализация AR.js для iOS...';
+            
+            // Проверяем, что AR.js загружен
+            if (typeof THREEx === 'undefined') {
+                statusEl.textContent = 'Ошибка: AR.js не загружен. Попробуйте обновить страницу.';
+                console.error('THREEx не определен. AR.js не загружен.');
+                return;
+            }
             
             // Инициализируем AR.js источник
             arToolkitSource = new THREEx.ArToolkitSource({
