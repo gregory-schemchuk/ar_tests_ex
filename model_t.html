@@ -197,13 +197,14 @@
 
     <script type="module">
         // Импорты модулей с обработкой ошибок
-        let THREE, GLTFLoader;
+        let THREE, GLTFLoader, THREEx;
         
         // Функция для загрузки с fallback
         async function loadModules() {
             // Сначала пробуем через importmap (если поддерживается)
             try {
                 THREE = await import('three');
+                THREEx = await import('threex');
                 // Three.js экспортирует как namespace, проверяем структуру
                 if (THREE && !THREE.Scene && THREE.default) {
                     THREE = THREE.default;
