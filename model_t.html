@@ -250,9 +250,11 @@
                 navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
                     if (supported) {
                         statusEl.textContent = 'WebXR AR поддерживается. Нажмите "Запустить AR"';
+                        console.log('WebXR AR поддерживается. Нажмите "Запустить AR"');
                         startArBtn.style.display = 'block';
                     } else {
                         statusEl.textContent = 'WebXR AR не поддерживается. Используем альтернативный режим.';
+                        console.log('WebXR AR не поддерживается. Используем альтернативный режим.');
                         initFallbackAR();
                     }
                 });
