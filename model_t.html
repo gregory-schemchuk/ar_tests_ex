@@ -176,14 +176,15 @@
         "imports": {
             "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
             "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-            "threex": "https://raw.githack.com/AR-js-org/AR.js/master/three.js/build/ar-threex.js"
+            "threex": "https://raw.githack.com/AR-js-org/AR.js/master/three.js/build/ar.js"
         }
-    }
+    } 
     </script>
     
     <!-- Fallback для importmap (если не поддерживается) -->
     <script>
         if (!HTMLScriptElement.supports || !HTMLScriptElement.supports('importmap')) {
+            // https://raw.githack.com/AR-js-org/AR.js/master/three.js/build/ar-threex.js
             // Загружаем через динамический импорт
             window.threeModule = 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
             window.threeAddons = 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/';
@@ -192,7 +193,7 @@
 
     <!-- AR.js загружаем отдельно, так как он не имеет модульной версии -->
     <!-- Используем unpkg как альтернативу jsdelivr -->
-    <script src="https://unpkg.com/ar.js@3.4.0/build/ar.js" 
+    <script src="https://raw.githack.com/AR-js-org/AR.js/master/three.js/build/ar.js" 
             onerror="this.onerror=null; this.src='https://raw.githack.com/AR-js-org/AR.js/master/three.js/build/ar.js'"></script>
 
     <script type="module">
