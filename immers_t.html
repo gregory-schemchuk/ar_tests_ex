@@ -64,6 +64,21 @@ async function activateXR() {
 
   const scene = new THREE.Scene();
 
+  // Add lighting to the scene
+  // Hemisphere light for ambient lighting (sky and ground colors)
+  const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
+  hemisphereLight.position.set(0, 1, 0);
+  scene.add(hemisphereLight);
+  
+  // Directional light for main illumination
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  directionalLight.position.set(1, 1, 1);
+  scene.add(directionalLight);
+  
+  // Additional ambient light for better visibility
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+  scene.add(ambientLight);
+
   // Load GLTF model
   const loader = new THREE.GLTFLoader();
   let model = null;
@@ -71,7 +86,7 @@ async function activateXR() {
   try {
     const gltf = await new Promise((resolve, reject) => {
       loader.load(
-        './Horse_animation.gltf',
+        './horse_gltf/Horse_animation.gltf',
         (gltf) => resolve(gltf),
         (progress) => console.log('Loading progress:', progress),
         (error) => reject(error)
