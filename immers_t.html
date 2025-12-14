@@ -86,7 +86,7 @@ async function activateXR() {
   try {
     const gltf = await new Promise((resolve, reject) => {
       loader.load(
-        './horse_gltf/Horse_animation.gltf',
+        'Horse_animation.gltf',
         (gltf) => resolve(gltf),
         (progress) => console.log('Loading progress:', progress),
         (error) => reject(error)
