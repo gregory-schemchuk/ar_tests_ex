@@ -15,8 +15,38 @@
 
 <!-- Starting an immersive WebXR session requires user interaction.
     We start this one with a simple button. -->
-<button onclick="activateXR()">Start Hello WebXR</button>
+<button id="start-btn" onclick="activateXR()">Start Hello WebXR</button>
+<button id="record-btn" onclick="toggleRecording()" style="display: none; margin-top: 10px; padding: 10px 20px; font-size: 16px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">
+  Начать запись
+</button>
+<style>
+  #record-btn.recording {
+    background-color: #f44336;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+  button {
+    padding: 10px 20px;
+    font-size: 16px;
+    margin: 5px;
+    cursor: pointer;
+  }
+</style>
 <script>
+// Variables for video recording
+let isRecording = false;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordingCanvas = null;
+let recordingCtx = null;
+let videoStream = null;
+let session = null;
+let renderer = null;
+let gl = null;
+
 async function activateXR() {
   if (navigator.xr) {
     alert("Supports XR!");
@@ -24,10 +54,13 @@ async function activateXR() {
     alert("No XR Support(");
   }
   
+  // Hide start button
+  document.getElementById('start-btn').style.display = 'none';
+  
   // Add a canvas element and initialize a WebGL context that is compatible with WebXR.
   const canvas = document.createElement("canvas");
   document.body.appendChild(canvas);
-  const gl = canvas.getContext("webgl", {xrCompatible: true});
+  gl = canvas.getContext("webgl", {xrCompatible: true});
 
   const scene = new THREE.Scene();
 
@@ -38,7 +71,7 @@ async function activateXR() {
   try {
     const gltf = await new Promise((resolve, reject) => {
       loader.load(
-        'Horse_animation.gltf',
+        './horse_gltf/Horse_animation.gltf',
         (gltf) => resolve(gltf),
         (progress) => console.log('Loading progress:', progress),
         (error) => reject(error)
@@ -61,7 +94,7 @@ async function activateXR() {
     // Fallback: create a simple cube if model fails to load
     const materials = [
       new THREE.MeshBasicMaterial({color: 0xff0000}),
-      new THREE.MeshBasicMaterial({color: 0x0000ff}),
+      new THREE.MeshBasicMaterial({color: 0x0000ff}), 
       new THREE.MeshBasicMaterial({color: 0x00ff00}),
       new THREE.MeshBasicMaterial({color: 0xff00ff}),
       new THREE.MeshBasicMaterial({color: 0x00ffff}),
@@ -73,7 +106,7 @@ async function activateXR() {
   }
 
   // Set up the WebGLRenderer, which handles rendering to the session's base layer.
-  const renderer = new THREE.WebGLRenderer({
+  renderer = new THREE.WebGLRenderer({
     alpha: true,
     preserveDrawingBuffer: true,
     canvas: canvas,
@@ -90,10 +123,16 @@ async function activateXR() {
   console.log("Run immersive session");
 
   // Initialize a WebXR session using "immersive-ar".
-  const session = await navigator.xr.requestSession("immersive-ar");
+  session = await navigator.xr.requestSession("immersive-ar");
   session.updateRenderState({
     baseLayer: new XRWebGLLayer(session, gl)
   });
+  
+  // Show record button
+  document.getElementById('record-btn').style.display = 'block';
+  
+  // Setup video recording
+  setupVideoRecording();
   
   // A 'local' reference space has a native origin that is located
   // near the viewer's position at the time the session was created.
@@ -129,11 +168,161 @@ async function activateXR() {
         // Render the scene with THREE.WebGLRenderer.
         renderer.render(scene, camera);
       }
+      
+      // Copy frame to recording canvas if recording
+      if (isRecording) {
+        copyFrameToRecordingCanvas();
+      }
     }
   }
   session.requestAnimationFrame(onXRFrame);
+}
 
+// Setup video recording using canvas capture
+function setupVideoRecording() {
+  // Create a canvas for recording
+  recordingCanvas = document.createElement('canvas');
+  recordingCanvas.width = window.innerWidth;
+  recordingCanvas.height = window.innerHeight;
+  recordingCanvas.style.display = 'none';
+  document.body.appendChild(recordingCanvas);
+  recordingCtx = recordingCanvas.getContext('2d');
   
+  // Get canvas stream for recording
+  videoStream = recordingCanvas.captureStream(30); // 30 FPS
+}
+
+// Function to copy frame from WebGL framebuffer to recording canvas
+function copyFrameToRecordingCanvas() {
+  if (!recordingCanvas || !recordingCtx || !renderer || !session || !isRecording) return;
+  
+  try {
+    // Get viewport dimensions from the current view
+    const baseLayer = session.renderState.baseLayer;
+    if (!baseLayer) return;
+    
+    // Use a reasonable size for recording
+    const width = recordingCanvas.width || window.innerWidth;
+    const height = recordingCanvas.height || window.innerHeight;
+    
+    // Read pixels from the current framebuffer (baseLayer)
+    // Note: We need to read from the bound framebuffer
+    const pixels = new Uint8Array(width * height * 4);
+    
+    // Bind the baseLayer framebuffer to read from it
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, baseLayer.framebuffer);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    
+    // Flip vertically (WebGL has origin at bottom-left, canvas at top-left)
+    const flippedPixels = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const srcRow = (height - 1 - y) * width * 4;
+      const dstRow = y * width * 4;
+      flippedPixels.set(pixels.subarray(srcRow, srcRow + width * 4), dstRow);
+    }
+    
+    // Create ImageData and put it on canvas
+    const imageData = new ImageData(new Uint8ClampedArray(flippedPixels), width, height);
+    recordingCtx.putImageData(imageData, 0, 0);
+  } catch (error) {
+    console.error("Error copying frame:", error);
+  }
+}
+
+// Toggle recording function
+function toggleRecording() {
+  if (!session || !videoStream) {
+    alert("AR session not started yet");
+    return;
+  }
+  
+  if (!isRecording) {
+    // Start recording
+    startRecording();
+  } else {
+    // Stop recording
+    stopRecording();
+  }
+}
+
+function startRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    return;
+  }
+  
+  // Determine the best video codec
+  let options = { mimeType: 'video/webm;codecs=vp9' };
+  if (MediaRecorder.isTypeSupported('video/mp4')) {
+    options = { mimeType: 'video/mp4' };
+  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+    options = { mimeType: 'video/webm;codecs=vp9' };
+  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+    options = { mimeType: 'video/webm;codecs=vp8' };
+  } else {
+    options = { mimeType: 'video/webm' };
+  }
+  
+  try {
+    mediaRecorder = new MediaRecorder(videoStream, options);
+    recordedChunks = [];
+    
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        recordedChunks.push(event.data);
+      }
+    };
+    
+    mediaRecorder.onstop = () => {
+      if (recordedChunks.length === 0) {
+        alert("No video data recorded");
+        return;
+      }
+      
+      const blob = new Blob(recordedChunks, { 
+        type: options.mimeType || 'video/webm' 
+      });
+      
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ar-recording-${Date.now()}.${options.mimeType.includes('mp4') ? 'mp4' : 'webm'}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      recordedChunks = [];
+      alert("Video saved!");
+    };
+    
+    mediaRecorder.onerror = (event) => {
+      console.error("MediaRecorder error:", event);
+      alert("Recording error: " + event.error);
+    };
+    
+    mediaRecorder.start(1000); // Collect data every second
+    isRecording = true;
+    const recordBtn = document.getElementById('record-btn');
+    recordBtn.textContent = 'Остановить запись';
+    recordBtn.classList.add('recording');
+    
+    console.log("Recording started");
+  } catch (error) {
+    console.error("Error starting recording:", error);
+    alert("Error starting recording: " + error.message);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    isRecording = false;
+    const recordBtn = document.getElementById('record-btn');
+    recordBtn.textContent = 'Начать запись';
+    recordBtn.classList.remove('recording');
+    console.log("Recording stopped");
+  }
 }
 </script>
 </body>
