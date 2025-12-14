@@ -40,8 +40,9 @@ async function activateXR() {
   ];
   
   // Create the cube and add it to the demo scene.
-  const cube = new THREE.Mesh(new THREE.BoxBufferGeometry(0.4, 0.4, 0.4), materials);
-  cube.position.set(1, 1, 1);
+  // Position the cube in front of the camera (negative Z is forward in AR)
+  const cube = new THREE.Mesh(new THREE.BoxBufferGeometry(0.2, 0.2, 0.2), materials);
+  cube.position.set(0, 0, -0.5);
   scene.add(cube);
 
   // Set up the WebGLRenderer, which handles rendering to the session's base layer.
@@ -83,19 +84,24 @@ async function activateXR() {
     // XRFrame.getViewerPose can return null while the session attempts to establish tracking.
     const pose = frame.getViewerPose(referenceSpace);
     if (pose) {
-      // In mobile AR, we only have one view.
-      const view = pose.views[0];
+      // Clear the framebuffer before rendering
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      
+      // Render each view (usually one for mobile AR)
+      for (const view of pose.views) {
+        const viewport = session.renderState.baseLayer.getViewport(view);
+        gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+        
+        renderer.setSize(viewport.width, viewport.height, false);
   
-      const viewport = session.renderState.baseLayer.getViewport(view);
-      renderer.setSize(viewport.width, viewport.height)
+        // Use the view's transform matrix and projection matrix to configure the THREE.camera.
+        camera.matrix.fromArray(view.transform.matrix);
+        camera.projectionMatrix.fromArray(view.projectionMatrix);
+        camera.updateMatrixWorld(true);
   
-      // Use the view's transform matrix and projection matrix to configure the THREE.camera.
-      camera.matrix.fromArray(view.transform.matrix)
-      camera.projectionMatrix.fromArray(view.projectionMatrix);
-      camera.updateMatrixWorld(true);
-  
-      // Render the scene with THREE.WebGLRenderer.
-      renderer.render(scene, camera)
+        // Render the scene with THREE.WebGLRenderer.
+        renderer.render(scene, camera);
+      }
     }
   }
   session.requestAnimationFrame(onXRFrame);
