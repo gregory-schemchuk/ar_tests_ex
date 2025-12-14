@@ -40,7 +40,7 @@ async function activateXR() {
   ];
   
   // Create the cube and add it to the demo scene.
-  const cube = new THREE.Mesh(new THREE.BoxBufferGeometry(0.2, 0.2, 0.2), materials);
+  const cube = new THREE.Mesh(new THREE.BoxBufferGeometry(0.4, 0.4, 0.4), materials);
   cube.position.set(1, 1, 1);
   scene.add(cube);
 
@@ -58,6 +58,8 @@ async function activateXR() {
   // to handle the matrices independently.
   const camera = new THREE.PerspectiveCamera();
   camera.matrixAutoUpdate = false;
+
+  console.log("Run immersive session");
 
   // Initialize a WebXR session using "immersive-ar".
   const session = await navigator.xr.requestSession("immersive-ar");
