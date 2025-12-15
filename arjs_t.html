@@ -95,6 +95,10 @@
         let markerRoot = null;
         let animationMixer = null;
         let clock = new THREE.Clock();
+        let floorPlane = null; // Виртуальная плоскость пола
+        let cameraAngle = 0; // Угол наклона камеры
+        let raycaster = new THREE.Raycaster();
+        let mouse = new THREE.Vector2();
 
         // Инициализация
         function init() {
@@ -187,6 +191,10 @@
                     directionalLight.position.set(1, 1, 1);
                     scene.add(directionalLight);
                     
+                    // Создаем виртуальную плоскость пола для размещения модели
+                    // Плоскость создается на определенном расстоянии от камеры
+                    floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+                    
                     // Создаем корневой объект для модели
                     markerRoot = new THREE.Group();
                     scene.add(markerRoot);
@@ -195,6 +203,28 @@
                     
                     // Начинаем анимационный цикл
                     animate();
+                    
+                    // Отслеживание ориентации устройства (для определения угла камеры)
+                    if (window.DeviceOrientationEvent) {
+                        // Запрашиваем разрешение на использование DeviceOrientation (для iOS 13+)
+                        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                            DeviceOrientationEvent.requestPermission()
+                                .then(response => {
+                                    if (response === 'granted') {
+                                        window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                                    } else {
+                                        // Если разрешение не получено, используем альтернативный метод
+                                        initDeviceMotion();
+                                    }
+                                })
+                                .catch(console.error);
+                        } else {
+                            window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                        }
+                    } else {
+                        // Если DeviceOrientation не поддерживается, пробуем DeviceMotion
+                        initDeviceMotion();
+                    }
                 });
             });
         }
@@ -247,6 +277,64 @@
             );
         }
 
+        // Обработка ориентации устройства для определения угла камеры
+        function onDeviceOrientation(event) {
+            if (event.beta !== null) {
+                // beta - угол наклона устройства вперед/назад (0-180)
+                // Нормализуем угол наклона и ограничиваем диапазон
+                let angle = (event.beta - 90) * Math.PI / 180;
+                // Ограничиваем угол в разумных пределах (-45 до 45 градусов)
+                angle = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, angle));
+                cameraAngle = angle;
+            }
+        }
+        
+        // Альтернативный способ определения угла через акселерометр (если DeviceOrientation недоступен)
+        function initDeviceMotion() {
+            if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', (event) => {
+                    if (event.accelerationIncludingGravity) {
+                        const accel = event.accelerationIncludingGravity;
+                        // Вычисляем угол наклона на основе гравитации
+                        const angle = Math.atan2(accel.x, accel.z) - Math.PI / 2;
+                        if (!isNaN(angle)) {
+                            cameraAngle = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, angle * 0.5));
+                        }
+                    }
+                }, false);
+            }
+        }
+
+        // Вычисление точки размещения модели на виртуальной плоскости
+        function calculatePlacementPoint(screenX, screenY) {
+            // Преобразуем координаты экрана в нормализованные координаты (-1 до 1)
+            const x = (screenX / window.innerWidth) * 2 - 1;
+            const y = -(screenY / window.innerHeight) * 2 + 1;
+            
+            // Расстояние от камеры до точки размещения
+            const distance = 1.5;
+            
+            // Вычисляем позицию на основе координат экрана
+            // X и Z определяются горизонтальной позицией клика
+            // Y определяется вертикальной позицией и наклоном камеры
+            const point = new THREE.Vector3();
+            
+            // Горизонтальная позиция (влево-вправо)
+            point.x = x * 0.8;
+            
+            // Вертикальная позиция (вверх-вниз)
+            // Нижняя часть экрана = ниже по Y, верхняя = выше по Y
+            // Учитываем наклон камеры для размещения на "полу"
+            const baseY = -0.3 - (y * 0.3); // Базовая высота с учетом вертикальной позиции
+            const angleAdjustment = Math.sin(cameraAngle) * distance * 0.2;
+            point.y = baseY + angleAdjustment;
+            
+            // Глубина (расстояние от камеры)
+            point.z = -distance + (y * 0.2); // Немного корректируем глубину по вертикали
+            
+            return point;
+        }
+
         // Размещение модели в центре экрана
         function placeModelAtCenter() {
             if (!model || !markerRoot || modelPlaced) return;
@@ -258,9 +346,32 @@
                 model.parent.remove(model);
             }
             
-            // Размещаем модель перед камерой
-            markerRoot.position.set(0, -0.5, -1.5);
-            markerRoot.rotation.set(0, 0, 0);
+            // Вычисляем точку размещения в центре экрана
+            const placementPoint = calculatePlacementPoint(window.innerWidth / 2, window.innerHeight / 2);
+            
+            // Размещаем модель на виртуальной плоскости
+            markerRoot.position.copy(placementPoint);
+            
+            // Поворачиваем модель так, чтобы она стояла на плоскости
+            // Учитываем наклон камеры
+            markerRoot.rotation.x = -cameraAngle * 0.8; // Слегка смягчаем поворот
+            markerRoot.rotation.y = 0;
+            markerRoot.rotation.z = 0;
+            
+            // Вычисляем нижнюю точку модели для корректного размещения на плоскости
+            if (model) {
+                try {
+                    const box = new THREE.Box3().setFromObject(model);
+                    if (box.min.y !== Infinity && box.max.y !== Infinity) {
+                        const modelHeight = box.max.y - box.min.y;
+                        // Сдвигаем модель вниз на половину её высоты, чтобы она стояла на плоскости
+                        markerRoot.position.y -= (modelHeight * model.scale.y) / 2;
+                    }
+                } catch (e) {
+                    // Если не удалось вычислить, используем фиксированное смещение
+                    markerRoot.position.y -= 0.1;
+                }
+            }
             
             // Добавляем модель к markerRoot
             markerRoot.add(model);
@@ -268,9 +379,9 @@
             model.visible = true;
             modelPlaced = true;
             instructionsEl.style.display = 'none';
-            statusEl.textContent = 'Модель размещена!';
+            statusEl.textContent = 'Модель размещена на поверхности!';
             
-            console.log('Модель размещена:', model.position, model.visible);
+            console.log('Модель размещена:', markerRoot.position, model.visible);
         }
 
         // Обработка клика для размещения модели
@@ -281,37 +392,66 @@
                 console.log('Модель или markerRoot не готовы');
                 return;
             }
-            
-            if (modelPlaced) {
-                console.log('Модель уже размещена');
-                return;
-            }
 
             // Получаем координаты клика
             const rect = renderer.domElement.getBoundingClientRect();
-            const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            const clickX = event.clientX - rect.left;
+            const clickY = event.clientY - rect.top;
 
-            console.log('Координаты клика:', x, y);
+            console.log('Координаты клика:', clickX, clickY);
 
-            // Удаляем модель из сцены если она там есть
+            // Если модель уже размещена, перемещаем её в новую точку
+            // Если нет - размещаем впервые
+            
+            // Удаляем модель из текущего родителя если есть
             if (model.parent) {
                 model.parent.remove(model);
             }
             
-            // Размещаем модель в точке клика
-            markerRoot.position.set(x * 1.2, y * 1.2 - 0.5, -1.5);
-            markerRoot.rotation.set(0, 0, 0);
+            // Вычисляем точку размещения на виртуальной плоскости
+            const placementPoint = calculatePlacementPoint(clickX, clickY);
+            
+            // Размещаем модель на виртуальной плоскости в точке клика
+            markerRoot.position.copy(placementPoint);
+            
+            // Поворачиваем модель так, чтобы она стояла на плоскости
+            // Учитываем наклон камеры для правильной ориентации
+            // Модель должна "стоять" на плоскости, поэтому поворачиваем на угол камеры
+            markerRoot.rotation.x = -cameraAngle * 0.8; // Слегка смягчаем поворот
+            markerRoot.rotation.y = 0;
+            markerRoot.rotation.z = 0;
+            
+            // Вычисляем нижнюю точку модели для корректного размещения на плоскости
+            // Это нужно чтобы модель "касалась" плоскости нижней частью
+            if (model) {
+                try {
+                    // Получаем ограничивающий бокс модели
+                    const box = new THREE.Box3().setFromObject(model);
+                    if (box.min.y !== Infinity && box.max.y !== Infinity) {
+                        const modelHeight = box.max.y - box.min.y;
+                        // Сдвигаем модель вниз на половину её высоты, чтобы она стояла на плоскости
+                        markerRoot.position.y -= (modelHeight * model.scale.y) / 2;
+                    }
+                } catch (e) {
+                    // Если не удалось вычислить, используем фиксированное смещение
+                    markerRoot.position.y -= 0.1;
+                }
+            }
             
             // Добавляем модель к markerRoot
             markerRoot.add(model);
             
             model.visible = true;
-            modelPlaced = true;
-            instructionsEl.style.display = 'none';
-            statusEl.textContent = 'Модель размещена!';
             
-            console.log('Модель размещена по клику:', markerRoot.position, model.visible);
+            if (!modelPlaced) {
+                modelPlaced = true;
+                instructionsEl.style.display = 'none';
+                statusEl.textContent = 'Модель размещена на поверхности!';
+            } else {
+                statusEl.textContent = 'Модель перемещена на поверхность!';
+            }
+            
+            console.log('Модель размещена по клику:', markerRoot.position, 'угол камеры:', cameraAngle);
         }
 
         // Анимационный цикл
@@ -328,19 +468,28 @@
                 // Для markerless режима устанавливаем камеру в начало координат
                 // и смотрим вперед (в отрицательном направлении Z)
                 camera.position.set(0, 0, 0);
-                camera.matrix.identity();
+                
+                // Применяем небольшой наклон камеры для имитации реального угла обзора
+                // Это помогает модели лучше "стоять" на поверхности
+                const cameraRotationX = cameraAngle * 0.3; // Смягчаем влияние угла
+                camera.rotation.x = cameraRotationX;
+                camera.rotation.y = 0;
+                camera.rotation.z = 0;
+                
                 camera.updateMatrixWorld(true);
+                
+                // Обновляем ориентацию модели при изменении угла камеры
+                // чтобы она всегда стояла на плоскости
+                if (model && model.visible && markerRoot && modelPlaced) {
+                    // Плавно обновляем ориентацию модели относительно плоскости
+                    markerRoot.rotation.x = -cameraAngle;
+                }
             }
 
             // Обновляем анимации модели
             if (animationMixer) {
                 const delta = clock.getDelta();
                 animationMixer.update(delta);
-            }
-
-            // Небольшой плавный поворот модели для демонстрации (опционально)
-            if (model && model.visible && markerRoot && modelPlaced) {
-                markerRoot.rotation.y += 0.005;
             }
 
             // Рендеринг сцены
