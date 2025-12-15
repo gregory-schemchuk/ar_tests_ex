@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AR Horse - Markerless</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #arjs-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #status {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 15px;
+            font-size: 14px;
+            text-align: center;
+            max-width: 300px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+            display: none;
+        }
+
+        a-scene {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Скрываем стандартные элементы AR.js */
+        .a-enter-vr-button,
+        .a-orientation-modal {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="arjs-container">
+        <div id="status">Инициализация AR...</div>
+        <div id="instructions">
+            Наведите камеру на поверхность и коснитесь экрана для размещения модели лошади
+        </div>
+    </div>
+
+    <!-- Three.js -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.126.0/build/three.min.js"></script>
+    
+    <!-- AR.js -->
+    <script src="./ar-threex.js"></script>
+    
+    <!-- GLTFLoader для Three.js -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.126.0/examples/js/loaders/GLTFLoader.js"></script>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const instructionsEl = document.getElementById('instructions');
+        const container = document.getElementById('arjs-container');
+
+        let scene, camera, renderer;
+        let arToolkitSource, arToolkitContext;
+        let model = null;
+        let modelPlaced = false;
+        let markerRoot = null;
+        let animationMixer = null;
+        let clock = new THREE.Clock();
+
+        // Инициализация
+        function init() {
+            // Создаем сцену
+            scene = new THREE.Scene();
+
+            // Создаем камеру
+            camera = new THREE.PerspectiveCamera(
+                70,
+                window.innerWidth / window.innerHeight,
+                0.01,
+                1000
+            );
+
+            // Создаем рендерер
+            renderer = new THREE.WebGLRenderer({
+                antialias: true,
+                alpha: true
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // Инициализация AR.js
+            initAR();
+
+            // Загрузка модели
+            loadModel();
+
+            // Обработка изменения размера окна
+            window.addEventListener('resize', onWindowResize);
+
+            // Обработка клика для размещения модели
+            renderer.domElement.addEventListener('click', onCanvasClick, false);
+        }
+
+        // Инициализация AR.js
+        function initAR() {
+            // AR.js источник (камера)
+            arToolkitSource = new THREEx.ArToolkitSource({
+                sourceType: 'webcam',
+            });
+
+            arToolkitSource.init(() => {
+                arToolkitSource.onResizeElement();
+                arToolkitSource.onResize();
+                
+                // Добавляем видео элемент
+                const videoElement = arToolkitSource.domElement;
+                videoElement.style.position = 'absolute';
+                videoElement.style.top = '0';
+                videoElement.style.left = '0';
+                videoElement.style.width = '100%';
+                videoElement.style.height = '100%';
+                videoElement.style.objectFit = 'cover';
+                container.insertBefore(videoElement, container.firstChild);
+
+                // AR.js контекст для markerless режима
+                arToolkitContext = new THREEx.ArToolkitContext({
+                    cameraParametersUrl: './camera_para.dat',
+                    detectionMode: 'mono',
+                    maxDetectionRate: 30,
+                    canvasWidth: arToolkitSource.domElement.clientWidth,
+                    canvasHeight: arToolkitSource.domElement.clientHeight,
+                    imageSmoothingEnabled: true,
+                });
+
+                arToolkitContext.init(() => {
+                    // Обновляем матрицу проекции камеры
+                    camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                    
+                    // Создаем корневой объект для модели
+                    markerRoot = new THREE.Group();
+                    scene.add(markerRoot);
+
+                    statusEl.textContent = 'AR готов. Загрузка модели...';
+                    
+                    // Начинаем анимационный цикл
+                    animate();
+                });
+            });
+        }
+
+        // Загрузка 3D модели
+        function loadModel() {
+            const loader = new THREE.GLTFLoader();
+            
+            loader.load(
+                './Horse_animation.gltf',
+                (gltf) => {
+                    model = gltf.scene;
+                    
+                    // Настройка модели
+                    model.scale.set(0.05, 0.05, 0.05); // Масштабирование для AR
+                    model.position.set(0, 0, 0);
+                    model.visible = false;
+                    
+                    // Добавляем модель в сцену (будет добавлена к markerRoot при размещении)
+                    
+                    // Настройка анимаций, если они есть
+                    if (gltf.animations && gltf.animations.length > 0) {
+                        animationMixer = new THREE.AnimationMixer(model);
+                        gltf.animations.forEach((clip) => {
+                            animationMixer.clipAction(clip).play();
+                        });
+                    }
+                    
+                    statusEl.textContent = 'Модель загружена. Коснитесь экрана для размещения.';
+                    instructionsEl.style.display = 'block';
+                    
+                    // Автоматическое размещение через 3 секунды, если пользователь не разместил вручную
+                    setTimeout(() => {
+                        if (!modelPlaced) {
+                            placeModelAtCenter();
+                        }
+                    }, 3000);
+                },
+                (progress) => {
+                    const percent = (progress.loaded / progress.total * 100).toFixed(0);
+                    statusEl.textContent = `Загрузка модели: ${percent}%`;
+                },
+                (error) => {
+                    console.error('Ошибка загрузки модели:', error);
+                    statusEl.textContent = 'Ошибка загрузки модели: ' + error.message;
+                }
+            );
+        }
+
+        // Размещение модели в центре экрана
+        function placeModelAtCenter() {
+            if (!model || !markerRoot || modelPlaced) return;
+
+            // Размещаем модель перед камерой
+            markerRoot.position.set(0, -0.5, -1.5);
+            markerRoot.rotation.set(0, 0, 0);
+            
+            // Добавляем модель к markerRoot если еще не добавлена
+            if (!markerRoot.children.includes(model)) {
+                markerRoot.add(model);
+            }
+            
+            model.visible = true;
+            modelPlaced = true;
+            instructionsEl.style.display = 'none';
+            statusEl.textContent = 'Модель размещена!';
+        }
+
+        // Обработка клика для размещения модели
+        function onCanvasClick(event) {
+            if (!model || !markerRoot || modelPlaced) return;
+
+            // Получаем координаты клика
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+            // Размещаем модель в точке клика
+            markerRoot.position.set(x * 1.2, y * 1.2 - 0.5, -1.5);
+            markerRoot.rotation.set(0, 0, 0);
+            
+            // Добавляем модель к markerRoot если еще не добавлена
+            if (!markerRoot.children.includes(model)) {
+                markerRoot.add(model);
+            }
+            
+            model.visible = true;
+            modelPlaced = true;
+            instructionsEl.style.display = 'none';
+            statusEl.textContent = 'Модель размещена!';
+        }
+
+        // Анимационный цикл
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (arToolkitSource && arToolkitSource.ready && arToolkitContext) {
+                // Обновляем AR.js контекст
+                arToolkitContext.update(arToolkitSource.domElement);
+                
+                // Обновляем матрицу проекции камеры
+                camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                
+                // Обновляем позицию камеры для markerless режима
+                // В markerless режиме используем фиксированную позицию камеры
+                camera.matrixWorldInverse.copy(arToolkitContext.getCameraMatrix());
+                camera.updateMatrixWorld();
+            }
+
+            // Обновляем анимации модели
+            if (animationMixer) {
+                const delta = clock.getDelta();
+                animationMixer.update(delta);
+            }
+
+            // Поворот модели для демонстрации (опционально)
+            if (model && model.visible && markerRoot) {
+                // Небольшой плавный поворот для демонстрации
+                // markerRoot.rotation.y += 0.005;
+            }
+
+            // Рендеринг сцены
+            renderer.render(scene, camera);
+        }
+
+        // Обработка изменения размера окна
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            
+            if (arToolkitSource) {
+                arToolkitSource.onResizeElement();
+                arToolkitSource.onResize();
+                if (arToolkitContext) {
+                    arToolkitContext.update(arToolkitSource.domElement);
+                }
+            }
+        }
+
+        // Инициализация при загрузке страницы
+        window.addEventListener('load', () => {
+            init();
+        });
+    </script>
+</body>
+</html>
+
