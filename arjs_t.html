@@ -99,6 +99,10 @@
         let cameraAngle = 0; // Угол наклона камеры
         let raycaster = new THREE.Raycaster();
         let mouse = new THREE.Vector2();
+        let worldModelPosition = null; // Мировая позиция модели (фиксированная в пространстве)
+        let initialCameraMatrix = null; // Начальная матрица камеры при размещении
+        let cameraMovement = new THREE.Matrix4(); // Матрица движения камеры
+        let lastCameraMatrix = new THREE.Matrix4(); // Последняя матрица камеры для отслеживания движения
 
         // Инициализация
         function init() {
@@ -305,8 +309,8 @@
             }
         }
 
-        // Вычисление точки размещения модели на виртуальной плоскости
-        function calculatePlacementPoint(screenX, screenY) {
+        // Вычисление точки размещения модели в мировых координатах
+        function calculateWorldPlacementPoint(screenX, screenY, cameraMatrix) {
             // Преобразуем координаты экрана в нормализованные координаты (-1 до 1)
             const x = (screenX / window.innerWidth) * 2 - 1;
             const y = -(screenY / window.innerHeight) * 2 + 1;
@@ -314,25 +318,23 @@
             // Расстояние от камеры до точки размещения
             const distance = 1.5;
             
-            // Вычисляем позицию на основе координат экрана
-            // X и Z определяются горизонтальной позицией клика
-            // Y определяется вертикальной позицией и наклоном камеры
-            const point = new THREE.Vector3();
+            // Создаем направляющий вектор от камеры через точку на экране
+            const direction = new THREE.Vector3(x, y, -1);
+            direction.normalize();
             
-            // Горизонтальная позиция (влево-вправо)
-            point.x = x * 0.8;
+            // Вычисляем позицию в локальных координатах камеры
+            const localPoint = new THREE.Vector3();
+            localPoint.copy(direction.multiplyScalar(distance));
             
-            // Вертикальная позиция (вверх-вниз)
-            // Нижняя часть экрана = ниже по Y, верхняя = выше по Y
-            // Учитываем наклон камеры для размещения на "полу"
-            const baseY = -0.3 - (y * 0.3); // Базовая высота с учетом вертикальной позиции
-            const angleAdjustment = Math.sin(cameraAngle) * distance * 0.2;
-            point.y = baseY + angleAdjustment;
+            // Корректируем Y позицию для размещения на "полу"
+            const baseY = -0.3 - (y * 0.3);
+            localPoint.y = baseY + Math.sin(cameraAngle) * distance * 0.2;
             
-            // Глубина (расстояние от камеры)
-            point.z = -distance + (y * 0.2); // Немного корректируем глубину по вертикали
+            // Преобразуем в мировые координаты используя матрицу камеры
+            const worldPoint = localPoint.clone();
+            worldPoint.applyMatrix4(cameraMatrix);
             
-            return point;
+            return worldPoint;
         }
 
         // Размещение модели в центре экрана
@@ -341,37 +343,52 @@
 
             console.log('Размещение модели в центре');
             
-            // Удаляем модель из сцены если она там есть
-            if (model.parent) {
-                model.parent.remove(model);
+            // Получаем текущую матрицу камеры
+            camera.updateMatrixWorld(true);
+            const currentCameraMatrix = camera.matrixWorld.clone();
+            
+            // Сохраняем начальную матрицу камеры
+            if (!initialCameraMatrix) {
+                initialCameraMatrix = currentCameraMatrix.clone();
+                lastCameraMatrix = currentCameraMatrix.clone();
             }
             
-            // Вычисляем точку размещения в центре экрана
-            const placementPoint = calculatePlacementPoint(window.innerWidth / 2, window.innerHeight / 2);
-            
-            // Размещаем модель на виртуальной плоскости
-            markerRoot.position.copy(placementPoint);
-            
-            // Поворачиваем модель так, чтобы она стояла на плоскости
-            // Учитываем наклон камеры
-            markerRoot.rotation.x = -cameraAngle * 0.8; // Слегка смягчаем поворот
-            markerRoot.rotation.y = 0;
-            markerRoot.rotation.z = 0;
+            // Вычисляем точку размещения в мировых координатах
+            worldModelPosition = calculateWorldPlacementPoint(
+                window.innerWidth / 2, 
+                window.innerHeight / 2,
+                currentCameraMatrix
+            );
             
             // Вычисляем нижнюю точку модели для корректного размещения на плоскости
+            let modelHeightOffset = 0;
             if (model) {
                 try {
                     const box = new THREE.Box3().setFromObject(model);
                     if (box.min.y !== Infinity && box.max.y !== Infinity) {
                         const modelHeight = box.max.y - box.min.y;
-                        // Сдвигаем модель вниз на половину её высоты, чтобы она стояла на плоскости
-                        markerRoot.position.y -= (modelHeight * model.scale.y) / 2;
+                        modelHeightOffset = (modelHeight * model.scale.y) / 2;
                     }
                 } catch (e) {
-                    // Если не удалось вычислить, используем фиксированное смещение
-                    markerRoot.position.y -= 0.1;
+                    modelHeightOffset = 0.1;
                 }
             }
+            
+            // Сдвигаем мировую позицию вниз на половину высоты модели
+            worldModelPosition.y -= modelHeightOffset;
+            
+            // Удаляем модель из сцены если она там есть
+            if (model.parent) {
+                model.parent.remove(model);
+            }
+            
+            // Устанавливаем начальную позицию относительно камеры
+            updateModelPositionFromWorld();
+            
+            // Поворачиваем модель так, чтобы она стояла на плоскости
+            markerRoot.rotation.x = -cameraAngle * 0.8;
+            markerRoot.rotation.y = 0;
+            markerRoot.rotation.z = 0;
             
             // Добавляем модель к markerRoot
             markerRoot.add(model);
@@ -381,7 +398,23 @@
             instructionsEl.style.display = 'none';
             statusEl.textContent = 'Модель размещена на поверхности!';
             
-            console.log('Модель размещена:', markerRoot.position, model.visible);
+            console.log('Модель размещена в мировых координатах:', worldModelPosition);
+        }
+        
+        // Обновление позиции модели из мировых координат относительно текущей позиции камеры
+        function updateModelPositionFromWorld() {
+            if (!worldModelPosition || !markerRoot) return;
+            
+            // Получаем текущую матрицу камеры
+            camera.updateMatrixWorld(true);
+            const currentCameraMatrix = camera.matrixWorld.clone();
+            const inverseCameraMatrix = currentCameraMatrix.clone().invert();
+            
+            // Преобразуем мировую позицию в локальные координаты текущей камеры
+            const localPosition = worldModelPosition.clone().applyMatrix4(inverseCameraMatrix);
+            
+            // Обновляем позицию модели
+            markerRoot.position.copy(localPosition);
         }
 
         // Обработка клика для размещения модели
@@ -518,4 +551,5 @@
     </script>
 </body>
 </html>
+
 
