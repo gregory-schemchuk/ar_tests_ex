@@ -127,8 +127,20 @@
             // Обработка изменения размера окна
             window.addEventListener('resize', onWindowResize);
 
-            // Обработка клика для размещения модели
+            // Обработка клика для размещения модели (на canvas и на контейнере)
             renderer.domElement.addEventListener('click', onCanvasClick, false);
+            renderer.domElement.style.pointerEvents = 'auto';
+            renderer.domElement.style.position = 'relative';
+            renderer.domElement.style.zIndex = '10';
+            
+            // Также добавляем обработчик на контейнер на случай если canvas не получает клики
+            container.addEventListener('click', (e) => {
+                // Проверяем что клик не по UI элементам
+                if (e.target.id !== 'status' && e.target.id !== 'instructions' && 
+                    e.target.parentElement.id !== 'status' && e.target.parentElement.id !== 'instructions') {
+                    onCanvasClick(e);
+                }
+            }, false);
         }
 
         // Инициализация AR.js
@@ -150,6 +162,7 @@
                 videoElement.style.width = '100%';
                 videoElement.style.height = '100%';
                 videoElement.style.objectFit = 'cover';
+                videoElement.style.pointerEvents = 'none'; // Позволяет клики проходить через видео
                 container.insertBefore(videoElement, container.firstChild);
 
                 // AR.js контекст для markerless режима
@@ -165,6 +178,14 @@
                 arToolkitContext.init(() => {
                     // Обновляем матрицу проекции камеры
                     camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                    
+                    // Добавляем освещение для видимости модели
+                    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+                    scene.add(ambientLight);
+                    
+                    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                    directionalLight.position.set(1, 1, 1);
+                    scene.add(directionalLight);
                     
                     // Создаем корневой объект для модели
                     markerRoot = new THREE.Group();
@@ -188,11 +209,13 @@
                     model = gltf.scene;
                     
                     // Настройка модели
-                    model.scale.set(0.05, 0.05, 0.05); // Масштабирование для AR
+                    model.scale.set(0.1, 0.1, 0.1); // Увеличиваем масштаб для лучшей видимости
                     model.position.set(0, 0, 0);
                     model.visible = false;
                     
-                    // Добавляем модель в сцену (будет добавлена к markerRoot при размещении)
+                    // Добавляем модель сразу в сцену для тестирования
+                    // Будет перемещена к markerRoot при размещении
+                    scene.add(model);
                     
                     // Настройка анимаций, если они есть
                     if (gltf.animations && gltf.animations.length > 0) {
@@ -202,15 +225,16 @@
                         });
                     }
                     
+                    console.log('Модель загружена успешно', model);
                     statusEl.textContent = 'Модель загружена. Коснитесь экрана для размещения.';
                     instructionsEl.style.display = 'block';
                     
-                    // Автоматическое размещение через 3 секунды, если пользователь не разместил вручную
+                    // Автоматическое размещение через 2 секунды, если пользователь не разместил вручную
                     setTimeout(() => {
                         if (!modelPlaced) {
                             placeModelAtCenter();
                         }
-                    }, 3000);
+                    }, 2000);
                 },
                 (progress) => {
                     const percent = (progress.loaded / progress.total * 100).toFixed(0);
@@ -227,43 +251,67 @@
         function placeModelAtCenter() {
             if (!model || !markerRoot || modelPlaced) return;
 
+            console.log('Размещение модели в центре');
+            
+            // Удаляем модель из сцены если она там есть
+            if (model.parent) {
+                model.parent.remove(model);
+            }
+            
             // Размещаем модель перед камерой
             markerRoot.position.set(0, -0.5, -1.5);
             markerRoot.rotation.set(0, 0, 0);
             
-            // Добавляем модель к markerRoot если еще не добавлена
-            if (!markerRoot.children.includes(model)) {
-                markerRoot.add(model);
-            }
+            // Добавляем модель к markerRoot
+            markerRoot.add(model);
             
             model.visible = true;
             modelPlaced = true;
             instructionsEl.style.display = 'none';
             statusEl.textContent = 'Модель размещена!';
+            
+            console.log('Модель размещена:', model.position, model.visible);
         }
 
         // Обработка клика для размещения модели
         function onCanvasClick(event) {
-            if (!model || !markerRoot || modelPlaced) return;
+            console.log('Клик зарегистрирован', model, markerRoot, modelPlaced);
+            
+            if (!model || !markerRoot) {
+                console.log('Модель или markerRoot не готовы');
+                return;
+            }
+            
+            if (modelPlaced) {
+                console.log('Модель уже размещена');
+                return;
+            }
 
             // Получаем координаты клика
             const rect = renderer.domElement.getBoundingClientRect();
             const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
             const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
+            console.log('Координаты клика:', x, y);
+
+            // Удаляем модель из сцены если она там есть
+            if (model.parent) {
+                model.parent.remove(model);
+            }
+            
             // Размещаем модель в точке клика
             markerRoot.position.set(x * 1.2, y * 1.2 - 0.5, -1.5);
             markerRoot.rotation.set(0, 0, 0);
             
-            // Добавляем модель к markerRoot если еще не добавлена
-            if (!markerRoot.children.includes(model)) {
-                markerRoot.add(model);
-            }
+            // Добавляем модель к markerRoot
+            markerRoot.add(model);
             
             model.visible = true;
             modelPlaced = true;
             instructionsEl.style.display = 'none';
             statusEl.textContent = 'Модель размещена!';
+            
+            console.log('Модель размещена по клику:', markerRoot.position, model.visible);
         }
 
         // Анимационный цикл
@@ -277,10 +325,11 @@
                 // Обновляем матрицу проекции камеры
                 camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
                 
-                // Обновляем позицию камеры для markerless режима
-                // В markerless режиме используем фиксированную позицию камеры
-                camera.matrixWorldInverse.copy(arToolkitContext.getCameraMatrix());
-                camera.updateMatrixWorld();
+                // Для markerless режима устанавливаем камеру в начало координат
+                // и смотрим вперед (в отрицательном направлении Z)
+                camera.position.set(0, 0, 0);
+                camera.matrix.identity();
+                camera.updateMatrixWorld(true);
             }
 
             // Обновляем анимации модели
@@ -289,10 +338,9 @@
                 animationMixer.update(delta);
             }
 
-            // Поворот модели для демонстрации (опционально)
-            if (model && model.visible && markerRoot) {
-                // Небольшой плавный поворот для демонстрации
-                // markerRoot.rotation.y += 0.005;
+            // Небольшой плавный поворот модели для демонстрации (опционально)
+            if (model && model.visible && markerRoot && modelPlaced) {
+                markerRoot.rotation.y += 0.005;
             }
 
             // Рендеринг сцены
