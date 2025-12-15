@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AR Horse - Markerless WebXR</title>
+    <title>AR Horse - Markerless</title>
     <style>
         * {
             margin: 0;
@@ -15,10 +15,9 @@
             font-family: Arial, sans-serif;
             overflow: hidden;
             background: #000;
-            margin: 0;
         }
 
-        #container {
+        #arjs-container {
             width: 100vw;
             height: 100vh;
             position: relative;
@@ -55,50 +54,31 @@
             display: none;
         }
 
-        #start-btn {
-            position: absolute;
-            bottom: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 15px 30px;
-            font-size: 16px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 50px;
-            cursor: pointer;
-            z-index: 100;
-            font-weight: 600;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-        }
-
-        #start-btn:hover {
-            transform: translateX(-50%) translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
-        }
-
-        #start-btn:active {
-            transform: translateX(-50%) translateY(0);
-        }
-
-        canvas {
-            display: block;
+        a-scene {
             width: 100%;
             height: 100%;
+        }
+
+        /* Скрываем стандартные элементы AR.js */
+        .a-enter-vr-button,
+        .a-orientation-modal {
+            display: none !important;
         }
     </style>
 </head>
 <body>
-    <div id="container">
-        <div id="status">Инициализация...</div>
+    <div id="arjs-container">
+        <div id="status">Инициализация AR...</div>
         <div id="instructions">
-            Наведите камеру на горизонтальную поверхность и коснитесь экрана для размещения модели лошади
+            Наведите камеру на поверхность и коснитесь экрана для размещения модели лошади
         </div>
-        <button id="start-btn">Запустить AR</button>
     </div>
 
     <!-- Three.js -->
     <script src="https://cdn.jsdelivr.net/npm/three@0.126.0/build/three.min.js"></script>
+    
+    <!-- AR.js -->
+    <script src="./ar-threex.js"></script>
     
     <!-- GLTFLoader для Three.js -->
     <script src="https://cdn.jsdelivr.net/npm/three@0.126.0/examples/js/loaders/GLTFLoader.js"></script>
@@ -106,84 +86,49 @@
     <script>
         const statusEl = document.getElementById('status');
         const instructionsEl = document.getElementById('instructions');
-        const startBtn = document.getElementById('start-btn');
-        const container = document.getElementById('container');
+        const container = document.getElementById('arjs-container');
 
         let scene, camera, renderer;
-        let session = null;
-        let gl = null;
+        let arToolkitSource, arToolkitContext;
         let model = null;
         let modelPlaced = false;
+        let markerRoot = null;
         let animationMixer = null;
         let clock = new THREE.Clock();
-        let hitTestSource = null;
-        let hitTestSourceRequested = false;
-        let referenceSpace = null;
+        let floorPlane = null; // Виртуальная плоскость пола
+        let cameraAngle = 0; // Угол наклона камеры
+        let raycaster = new THREE.Raycaster();
+        let mouse = new THREE.Vector2();
+        let worldModelPosition = null; // Мировая позиция модели в локальных координатах камеры при размещении
+        let initialCameraRotation = null; // Начальная ориентация камеры при размещении
+        let deviceOrientation = { alpha: 0, beta: 90, gamma: 0 }; // Текущая ориентация устройства
+        let initialDeviceOrientation = null; // Начальная ориентация устройства при размещении
+        let lastDeviceMotion = { x: 0, y: 0, z: 0 }; // Последнее движение устройства
 
-        // Проверка поддержки WebXR
-        async function checkXRSupport() {
-            if (!navigator.xr) {
-                statusEl.textContent = 'WebXR не поддерживается в этом браузере';
-                startBtn.style.display = 'none';
-                return false;
-            }
-
-            try {
-                const supported = await navigator.xr.isSessionSupported('immersive-ar');
-                if (supported) {
-                    statusEl.textContent = 'WebXR AR поддерживается. Нажмите "Запустить AR"';
-                    startBtn.style.display = 'block';
-                    return true;
-                } else {
-                    statusEl.textContent = 'WebXR AR не поддерживается на этом устройстве';
-                    startBtn.style.display = 'none';
-                    return false;
-                }
-            } catch (error) {
-                statusEl.textContent = 'Ошибка проверки WebXR: ' + error.message;
-                startBtn.style.display = 'none';
-                return false;
-            }
-        }
-
-        // Инициализация сцены
-        function initScene() {
+        // Инициализация
+        function init() {
+            // Создаем сцену
             scene = new THREE.Scene();
 
-            // Камера будет настраиваться WebXR
-            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-            camera.matrixAutoUpdate = false;
+            // Создаем камеру
+            camera = new THREE.PerspectiveCamera(
+                70,
+                window.innerWidth / window.innerHeight,
+                0.01,
+                1000
+            );
 
-            // Создаем canvas
-            const canvas = document.createElement('canvas');
-            container.appendChild(canvas);
-
-            // WebGL контекст
-            gl = canvas.getContext('webgl', { xrCompatible: true });
-
-            // Рендерер
+            // Создаем рендерер
             renderer = new THREE.WebGLRenderer({
-                alpha: true,
                 antialias: true,
-                canvas: canvas,
-                context: gl
+                alpha: true
             });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.autoClear = false;
-            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
 
-            // Освещение
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
-            scene.add(ambientLight);
-
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            directionalLight.position.set(1, 1, 1);
-            scene.add(directionalLight);
-
-            const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
-            hemisphereLight.position.set(0, 1, 0);
-            scene.add(hemisphereLight);
+            // Инициализация AR.js
+            initAR();
 
             // Загрузка модели
             loadModel();
@@ -191,26 +136,111 @@
             // Обработка изменения размера окна
             window.addEventListener('resize', onWindowResize);
 
-            // Обработка клика для размещения модели
-            canvas.addEventListener('click', onCanvasClick, false);
+            // Обработка клика для размещения модели (на canvas и на контейнере)
+            renderer.domElement.addEventListener('click', onCanvasClick, false);
+            renderer.domElement.style.pointerEvents = 'auto';
+            renderer.domElement.style.position = 'relative';
+            renderer.domElement.style.zIndex = '10';
+            
+            // Также добавляем обработчик на контейнер на случай если canvas не получает клики
+            container.addEventListener('click', (e) => {
+                // Проверяем что клик не по UI элементам
+                if (e.target.id !== 'status' && e.target.id !== 'instructions' && 
+                    e.target.parentElement.id !== 'status' && e.target.parentElement.id !== 'instructions') {
+                    onCanvasClick(e);
+                }
+            }, false);
+        }
+
+        // Инициализация AR.js
+        function initAR() {
+            // AR.js источник (камера)
+            arToolkitSource = new THREEx.ArToolkitSource({
+                sourceType: 'webcam',
+            });
+
+            arToolkitSource.init(() => {
+                arToolkitSource.onResizeElement();
+                arToolkitSource.onResize();
+                
+                // Добавляем видео элемент
+                const videoElement = arToolkitSource.domElement;
+                videoElement.style.position = 'absolute';
+                videoElement.style.top = '0';
+                videoElement.style.left = '0';
+                videoElement.style.width = '100%';
+                videoElement.style.height = '100%';
+                videoElement.style.objectFit = 'cover';
+                videoElement.style.pointerEvents = 'none'; // Позволяет клики проходить через видео
+                container.insertBefore(videoElement, container.firstChild);
+
+                // AR.js контекст для markerless режима
+                arToolkitContext = new THREEx.ArToolkitContext({
+                    cameraParametersUrl: './camera_para.dat',
+                    detectionMode: 'mono',
+                    maxDetectionRate: 30,
+                    canvasWidth: arToolkitSource.domElement.clientWidth,
+                    canvasHeight: arToolkitSource.domElement.clientHeight,
+                    imageSmoothingEnabled: true,
+                });
+
+                arToolkitContext.init(() => {
+                    // Обновляем матрицу проекции камеры
+                    camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                    
+                    // Добавляем освещение для видимости модели
+                    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+                    scene.add(ambientLight);
+                    
+                    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                    directionalLight.position.set(1, 1, 1);
+                    scene.add(directionalLight);
+                    
+            // Создаем виртуальную плоскость пола для размещения модели
+            floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+            
+            // Создаем корневой объект для модели
+            markerRoot = new THREE.Group();
+            scene.add(markerRoot);
+            
+            // Создаем визуальный индикатор плоскости (опционально, можно скрыть)
+            // Это помогает понять, где будет размещена модель
+            const planeHelper = new THREE.PlaneHelper(floorPlane, 2, 0xffff00);
+            planeHelper.visible = false; // Скрываем по умолчанию
+            scene.add(planeHelper);
+
+                    statusEl.textContent = 'AR готов. Загрузка модели...';
+                    
+                    // Инициализируем систему трекинга движения
+                    initMotionTracking();
+                    
+                    // Начинаем анимационный цикл
+                    animate();
+                    
+                    // Инициализация трекинга движения выполняется в initMotionTracking()
+                });
+            });
         }
 
         // Загрузка 3D модели
         function loadModel() {
             const loader = new THREE.GLTFLoader();
-            statusEl.textContent = 'Загрузка модели...';
-
+            
             loader.load(
                 './Horse_animation.gltf',
                 (gltf) => {
                     model = gltf.scene;
                     
                     // Настройка модели
-                    model.scale.set(0.1, 0.1, 0.1);
+                    model.scale.set(0.1, 0.1, 0.1); // Увеличиваем масштаб для лучшей видимости
+                    model.position.set(0, 0, 0);
                     model.visible = false;
+                    
+                    // Добавляем модель сразу в сцену для тестирования
+                    // Будет перемещена к markerRoot при размещении
                     scene.add(model);
                     
-                    // Настройка анимаций
+                    // Настройка анимаций, если они есть
                     if (gltf.animations && gltf.animations.length > 0) {
                         animationMixer = new THREE.AnimationMixer(model);
                         gltf.animations.forEach((clip) => {
@@ -218,8 +248,16 @@
                         });
                     }
                     
-                    statusEl.textContent = 'Модель загружена. Готово к использованию.';
-                    console.log('Модель загружена успешно');
+                    console.log('Модель загружена успешно', model);
+                    statusEl.textContent = 'Модель загружена. Коснитесь экрана для размещения.';
+                    instructionsEl.style.display = 'block';
+                    
+                    // Автоматическое размещение через 2 секунды, если пользователь не разместил вручную
+                    setTimeout(() => {
+                        if (!modelPlaced) {
+                            placeModelAtCenter();
+                        }
+                    }, 2000);
                 },
                 (progress) => {
                     const percent = (progress.loaded / progress.total * 100).toFixed(0);
@@ -232,106 +270,356 @@
             );
         }
 
-        // Запуск AR сессии
-        async function startARSession() {
-            if (!navigator.xr) {
-                statusEl.textContent = 'WebXR не поддерживается';
-                return;
+        // Обработка ориентации устройства для определения угла камеры
+        function onDeviceOrientation(event) {
+            if (event.beta !== null) {
+                // Сохраняем полную ориентацию устройства
+                deviceOrientation.alpha = event.alpha || 0;
+                deviceOrientation.beta = event.beta || 90;
+                deviceOrientation.gamma = event.gamma || 0;
+                
+                // beta - угол наклона устройства вперед/назад (0-180)
+                // Нормализуем угол наклона и ограничиваем диапазон
+                let angle = (event.beta - 90) * Math.PI / 180;
+                // Ограничиваем угол в разумных пределах (-45 до 45 градусов)
+                angle = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, angle));
+                cameraAngle = angle;
             }
+        }
+        
+        // Инициализация системы трекинга движения устройства
+        function initMotionTracking() {
+            // Пытаемся использовать DeviceOrientation для более точного трекинга
+            if (window.DeviceOrientationEvent) {
+                // Запрашиваем разрешение на использование DeviceOrientation (для iOS 13+)
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    DeviceOrientationEvent.requestPermission()
+                        .then(response => {
+                            if (response === 'granted') {
+                                window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                                statusEl.textContent = 'Трекинг движения активирован';
+                            } else {
+                                // Если разрешение не получено, используем альтернативный метод
+                                initDeviceMotion();
+                            }
+                        })
+                        .catch((error) => {
+                            console.error('Ошибка запроса разрешения DeviceOrientation:', error);
+                            initDeviceMotion();
+                        });
+                } else {
+                    // Для браузеров, которые не требуют разрешения
+                    window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                }
+            } else {
+                // Если DeviceOrientation не поддерживается, пробуем DeviceMotion
+                initDeviceMotion();
+            }
+        }
+        
+        // Альтернативный способ определения угла через акселерометр (если DeviceOrientation недоступен)
+        function initDeviceMotion() {
+            if (window.DeviceMotionEvent) {
+                // Запрашиваем разрешение для iOS 13+
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                    DeviceMotionEvent.requestPermission()
+                        .then(response => {
+                            if (response === 'granted') {
+                                setupDeviceMotion();
+                            } else {
+                                statusEl.textContent = 'Трекинг движения недоступен. Модель может не закрепляться в пространстве.';
+                            }
+                        })
+                        .catch((error) => {
+                            console.error('Ошибка запроса разрешения DeviceMotion:', error);
+                        });
+                } else {
+                    setupDeviceMotion();
+                }
+            } else {
+                statusEl.textContent = 'Трекинг движения не поддерживается. Модель будет следовать за камерой.';
+            }
+        }
+        
+        function setupDeviceMotion() {
+            window.addEventListener('devicemotion', (event) => {
+                if (event.accelerationIncludingGravity) {
+                    const accel = event.accelerationIncludingGravity;
+                    
+                    // Вычисляем угол наклона на основе гравитации
+                    const angle = Math.atan2(accel.x, accel.z) - Math.PI / 2;
+                    if (!isNaN(angle)) {
+                        cameraAngle = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, angle * 0.5));
+                    }
+                    
+                    // Также обновляем deviceOrientation для более точного трекинга
+                    // Это помогает когда DeviceOrientation не доступен
+                    if (!deviceOrientation.alpha || deviceOrientation.alpha === 0) {
+                        // Используем акселерометр для приблизительной оценки ориентации
+                        deviceOrientation.beta = 90 + Math.atan2(accel.y, accel.z) * 180 / Math.PI;
+                        deviceOrientation.gamma = Math.atan2(accel.x, accel.z) * 180 / Math.PI;
+                    }
+                }
+            }, false);
+        }
 
-            try {
-                // Запрашиваем AR сессию с hit-test
-                session = await navigator.xr.requestSession('immersive-ar', {
-                    requiredFeatures: ['hit-test', 'local'],
-                    optionalFeatures: ['dom-overlay'],
-                    domOverlay: { root: document.body }
-                });
+        // Вычисление точки размещения модели в локальных координатах камеры
+        function calculateLocalPlacementPoint(screenX, screenY) {
+            // Преобразуем координаты экрана в нормализованные координаты (-1 до 1)
+            const x = (screenX / window.innerWidth) * 2 - 1;
+            const y = -(screenY / window.innerHeight) * 2 + 1;
+            
+            // Расстояние от камеры до точки размещения
+            const distance = 1.5;
+            
+            // Вычисляем позицию в локальных координатах камеры
+            const point = new THREE.Vector3();
+            
+            // Горизонтальная позиция (влево-вправо)
+            point.x = x * 0.8;
+            
+            // Вертикальная позиция (вверх-вниз)
+            const baseY = -0.3 - (y * 0.3);
+            const angleAdjustment = Math.sin(cameraAngle) * distance * 0.2;
+            point.y = baseY + angleAdjustment;
+            
+            // Глубина (расстояние от камеры)
+            point.z = -distance + (y * 0.2);
+            
+            return point;
+        }
+        
+        // Вычисление изменения ориентации камеры относительно начальной
+        function getCameraRotationDelta() {
+            if (!initialDeviceOrientation) return { x: 0, y: 0, z: 0 };
+            
+            let deltaAlpha = deviceOrientation.alpha - initialDeviceOrientation.alpha;
+            // Нормализуем alpha в диапазон -180 до 180
+            while (deltaAlpha > 180) deltaAlpha -= 360;
+            while (deltaAlpha < -180) deltaAlpha += 360;
+            
+            const delta = {
+                x: (deviceOrientation.beta - initialDeviceOrientation.beta) * Math.PI / 180,
+                y: deltaAlpha * Math.PI / 180,
+                z: (deviceOrientation.gamma - initialDeviceOrientation.gamma) * Math.PI / 180
+            };
+            
+            // Ограничиваем значения для предотвращения резких скачков
+            delta.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, delta.x));
+            delta.y = Math.max(-Math.PI, Math.min(Math.PI, delta.y));
+            delta.z = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, delta.z));
+            
+            return delta;
+        }
 
-                session.addEventListener('end', onSessionEnd);
+        // Размещение модели в центре экрана
+        function placeModelAtCenter() {
+            if (!model || !markerRoot || modelPlaced) return;
 
-                // Настраиваем рендер состояние
-                session.updateRenderState({
-                    baseLayer: new XRWebGLLayer(session, gl)
-                });
-
-                // Запрашиваем reference space
-                referenceSpace = await session.requestReferenceSpace('local');
-
-                // Настраиваем hit-test source
-                const viewerSpace = await session.requestReferenceSpace('viewer');
-                hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-                hitTestSourceRequested = true;
-
-                // Скрываем кнопку запуска
-                startBtn.style.display = 'none';
-                instructionsEl.style.display = 'block';
-                statusEl.textContent = 'AR активен. Наведите камеру на поверхность.';
-
-                // Запускаем рендер-луп
-                session.requestAnimationFrame(onXRFrame);
-
-            } catch (error) {
-                console.error('Ошибка запуска AR:', error);
-                statusEl.textContent = 'Ошибка запуска AR: ' + error.message;
-                if (error.name === 'NotSupportedError') {
-                    statusEl.textContent = 'AR не поддерживается на этом устройстве';
+            console.log('Размещение модели в центре');
+            
+            // Сохраняем начальную ориентацию устройства
+            if (!initialDeviceOrientation) {
+                initialDeviceOrientation = {
+                    alpha: deviceOrientation.alpha,
+                    beta: deviceOrientation.beta,
+                    gamma: deviceOrientation.gamma
+                };
+            }
+            
+            // Вычисляем точку размещения в локальных координатах камеры
+            worldModelPosition = calculateLocalPlacementPoint(
+                window.innerWidth / 2, 
+                window.innerHeight / 2
+            );
+            
+            // Вычисляем нижнюю точку модели для корректного размещения на плоскости
+            let modelHeightOffset = 0;
+            if (model) {
+                try {
+                    const box = new THREE.Box3().setFromObject(model);
+                    if (box.min.y !== Infinity && box.max.y !== Infinity) {
+                        const modelHeight = box.max.y - box.min.y;
+                        modelHeightOffset = (modelHeight * model.scale.y) / 2;
+                    }
+                } catch (e) {
+                    modelHeightOffset = 0.1;
                 }
             }
+            
+            // Сдвигаем позицию вниз на половину высоты модели
+            worldModelPosition.y -= modelHeightOffset;
+            
+            // Удаляем модель из сцены если она там есть
+            if (model.parent) {
+                model.parent.remove(model);
+            }
+            
+            // Устанавливаем начальную позицию
+            markerRoot.position.copy(worldModelPosition);
+            
+            // Поворачиваем модель так, чтобы она стояла на плоскости
+            markerRoot.rotation.x = -cameraAngle * 0.8;
+            markerRoot.rotation.y = 0;
+            markerRoot.rotation.z = 0;
+            
+            // Добавляем модель к markerRoot
+            markerRoot.add(model);
+            
+            model.visible = true;
+            modelPlaced = true;
+            instructionsEl.style.display = 'none';
+            statusEl.textContent = 'Модель закреплена в пространстве! Двигайте устройство - модель останется на месте.';
+            
+            console.log('Модель размещена в локальных координатах:', worldModelPosition);
+        }
+        
+        // Обновление позиции модели для компенсации движения камеры
+        function updateModelPositionFromWorld() {
+            if (!worldModelPosition || !markerRoot || !initialDeviceOrientation) return;
+            
+            // Получаем изменение ориентации камеры
+            const rotationDelta = getCameraRotationDelta();
+            
+            // Создаем копию начальной позиции модели в локальных координатах камеры
+            const localPosition = worldModelPosition.clone();
+            
+            // Преобразуем изменение ориентации в кватернион для более точных расчетов
+            const rotationQuaternion = new THREE.Quaternion();
+            
+            // Создаем кватернион из эйлеровых углов изменения
+            // Используем обратные углы, чтобы компенсировать движение камеры
+            const euler = new THREE.Euler(
+                -rotationDelta.x * 0.7,  // Компенсируем наклон вперед/назад
+                -rotationDelta.y,        // Компенсируем поворот влево/вправо
+                -rotationDelta.z * 0.3   // Небольшая компенсация крена
+            );
+            
+            rotationQuaternion.setFromEuler(euler);
+            
+            // Поворачиваем локальную позицию обратно, чтобы модель оставалась на месте
+            localPosition.applyQuaternion(rotationQuaternion);
+            
+            // Применяем масштабирование компенсации в зависимости от наклона
+            // При наклоне камеры вниз, расстояние до модели должно немного увеличиваться
+            const distanceScale = 1 + Math.sin(rotationDelta.x) * 0.1;
+            localPosition.multiplyScalar(distanceScale);
+            
+            // Обновляем позицию модели
+            markerRoot.position.copy(localPosition);
         }
 
         // Обработка клика для размещения модели
         function onCanvasClick(event) {
-            if (!session || !hitTestSource || !model || modelPlaced) return;
-
-            // Получаем текущий frame для hit-test
-            const frame = session.requestAnimationFrame((time, frame) => {
-                performHitTest(frame, event);
-            });
-        }
-
-        // Выполнение hit-test и размещение модели
-        function performHitTest(frame, event) {
-            if (!hitTestSource || !model || modelPlaced) return;
-
-            const hitTestResults = frame.getHitTestResults(hitTestSource);
+            console.log('Клик зарегистрирован', model, markerRoot, modelPlaced);
             
-            if (hitTestResults.length > 0) {
-                const hit = hitTestResults[0];
-                const pose = hit.getPose(referenceSpace);
-
-                if (pose) {
-                    // Размещаем модель в точке пересечения
-                    model.visible = true;
-                    model.position.setFromMatrixPosition(pose.transform.matrix);
-                    model.quaternion.setFromRotationMatrix(pose.transform.matrix);
-
-                    // Вычисляем нижнюю точку модели для правильного размещения на поверхности
-                    try {
-                        const box = new THREE.Box3().setFromObject(model);
-                        if (box.min.y !== Infinity && box.max.y !== Infinity) {
-                            const modelHeight = box.max.y - box.min.y;
-                            // Сдвигаем модель вниз на половину высоты, чтобы она стояла на поверхности
-                            model.position.y -= (modelHeight * model.scale.y) / 2;
-                        }
-                    } catch (e) {
-                        model.position.y -= 0.1;
-                    }
-
-                    modelPlaced = true;
-                    instructionsEl.style.display = 'none';
-                    statusEl.textContent = 'Модель размещена на поверхности!';
-                    console.log('Модель размещена на поверхности');
-                }
-            } else {
-                // Если поверхность не найдена, пытаемся разместить на виртуальной плоскости
-                statusEl.textContent = 'Поверхность не обнаружена. Попробуйте еще раз.';
+            if (!model || !markerRoot) {
+                console.log('Модель или markerRoot не готовы');
+                return;
             }
+
+            // Получаем координаты клика
+            const rect = renderer.domElement.getBoundingClientRect();
+            const clickX = event.clientX - rect.left;
+            const clickY = event.clientY - rect.top;
+
+            console.log('Координаты клика:', clickX, clickY);
+
+            // Сохраняем начальную ориентацию устройства при первом размещении
+            if (!initialDeviceOrientation) {
+                initialDeviceOrientation = {
+                    alpha: deviceOrientation.alpha,
+                    beta: deviceOrientation.beta,
+                    gamma: deviceOrientation.gamma
+                };
+            }
+            
+            // Вычисляем точку размещения в локальных координатах камеры
+            worldModelPosition = calculateLocalPlacementPoint(clickX, clickY);
+            
+            // Вычисляем нижнюю точку модели для корректного размещения на плоскости
+            let modelHeightOffset = 0;
+            if (model) {
+                try {
+                    const box = new THREE.Box3().setFromObject(model);
+                    if (box.min.y !== Infinity && box.max.y !== Infinity) {
+                        const modelHeight = box.max.y - box.min.y;
+                        modelHeightOffset = (modelHeight * model.scale.y) / 2;
+                    }
+                } catch (e) {
+                    modelHeightOffset = 0.1;
+                }
+            }
+            
+            // Сдвигаем позицию вниз на половину высоты модели
+            worldModelPosition.y -= modelHeightOffset;
+            
+            // Удаляем модель из текущего родителя если есть
+            if (model.parent) {
+                model.parent.remove(model);
+            }
+            
+            // Устанавливаем позицию модели
+            markerRoot.position.copy(worldModelPosition);
+            
+            // Поворачиваем модель так, чтобы она стояла на плоскости
+            markerRoot.rotation.x = -cameraAngle * 0.8;
+            markerRoot.rotation.y = 0;
+            markerRoot.rotation.z = 0;
+            
+            // Добавляем модель к markerRoot
+            markerRoot.add(model);
+            
+            model.visible = true;
+            
+            if (!modelPlaced) {
+                modelPlaced = true;
+                instructionsEl.style.display = 'none';
+                statusEl.textContent = 'Модель закреплена в пространстве! Двигайте устройство - модель останется на месте.';
+            } else {
+                statusEl.textContent = 'Модель перемещена и закреплена в пространстве!';
+            }
+            
+            console.log('Модель размещена в локальных координатах:', worldModelPosition);
         }
 
-        // Рендер-луп WebXR
-        let lastFrame = null;
-        function onXRFrame(time, frame) {
-            session.requestAnimationFrame(onXRFrame);
+        // Анимационный цикл
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (arToolkitSource && arToolkitSource.ready && arToolkitContext) {
+                // Обновляем AR.js контекст
+                arToolkitContext.update(arToolkitSource.domElement);
+                
+                // Обновляем матрицу проекции камеры
+                camera.projectionMatrix.copy(arToolkitContext.getProjectionMatrix());
+                
+                // Для markerless режима устанавливаем камеру в начало координат
+                camera.position.set(0, 0, 0);
+                
+                // Применяем небольшой наклон камеры для имитации реального угла обзора
+                const cameraRotationX = cameraAngle * 0.3;
+                camera.rotation.x = cameraRotationX;
+                camera.rotation.y = 0;
+                camera.rotation.z = 0;
+                
+                // Обновляем матрицу мира камеры
+                camera.updateMatrixWorld(true);
+                
+                // Если модель размещена, обновляем её позицию относительно камеры
+                // чтобы она оставалась закрепленной в мировых координатах
+                if (model && model.visible && markerRoot && modelPlaced && worldModelPosition && initialDeviceOrientation) {
+                    // Обновляем позицию модели из мировых координат с компенсацией движения
+                    updateModelPositionFromWorld();
+                    
+                    // Обновляем ориентацию модели относительно плоскости
+                    // Модель должна "стоять" на плоскости независимо от угла камеры
+                    const rotationDelta = getCameraRotationDelta();
+                    markerRoot.rotation.x = -cameraAngle * 0.8 - rotationDelta.x * 0.5;
+                    // Небольшой поворот по Z для компенсации крена устройства
+                    markerRoot.rotation.z = -rotationDelta.z * 0.3;
+                }
+            }
 
             // Обновляем анимации модели
             if (animationMixer) {
@@ -339,97 +627,32 @@
                 animationMixer.update(delta);
             }
 
-            // Привязываем framebuffer
-            gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
-
-            // Получаем pose камеры
-            const pose = frame.getViewerPose(referenceSpace);
-            if (pose) {
-                // Очищаем буфер
-                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-                // Рендерим каждый view (обычно один для мобильных устройств)
-                for (const view of pose.views) {
-                    const viewport = session.renderState.baseLayer.getViewport(view);
-                    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-
-                    renderer.setSize(viewport.width, viewport.height, false);
-
-                    // Настраиваем камеру из матрицы view
-                    camera.matrix.fromArray(view.transform.matrix);
-                    camera.projectionMatrix.fromArray(view.projectionMatrix);
-                    camera.updateMatrixWorld(true);
-
-                    // Рендерим сцену
-                    renderer.render(scene, camera);
-                }
-
-                // Автоматическое размещение модели если она еще не размещена
-                // (опционально - можно убрать если нужен только ручной режим)
-                if (!modelPlaced && hitTestSource && model) {
-                    const hitTestResults = frame.getHitTestResults(hitTestSource);
-                    if (hitTestResults.length > 0) {
-                        const hit = hitTestResults[0];
-                        const hitPose = hit.getPose(referenceSpace);
-                        if (hitPose) {
-                            // Автоматически размещаем модель на первой найденной поверхности
-                            model.visible = true;
-                            model.position.setFromMatrixPosition(hitPose.transform.matrix);
-                            model.quaternion.setFromRotationMatrix(hitPose.transform.matrix);
-                            
-                            try {
-                                const box = new THREE.Box3().setFromObject(model);
-                                if (box.min.y !== Infinity && box.max.y !== Infinity) {
-                                    const modelHeight = box.max.y - box.min.y;
-                                    model.position.y -= (modelHeight * model.scale.y) / 2;
-                                }
-                            } catch (e) {
-                                model.position.y -= 0.1;
-                            }
-                            
-                            modelPlaced = true;
-                            instructionsEl.style.display = 'none';
-                            statusEl.textContent = 'Модель автоматически размещена на поверхности!';
-                        }
-                    }
-                }
-            }
-
-            lastFrame = frame;
-        }
-
-        // Завершение сессии
-        function onSessionEnd() {
-            hitTestSource = null;
-            hitTestSourceRequested = false;
-            referenceSpace = null;
-            modelPlaced = false;
-            if (model) model.visible = false;
-            
-            startBtn.style.display = 'block';
-            instructionsEl.style.display = 'none';
-            statusEl.textContent = 'AR сессия завершена. Нажмите "Запустить AR" для повторного запуска.';
+            // Рендеринг сцены
+            renderer.render(scene, camera);
         }
 
         // Обработка изменения размера окна
         function onWindowResize() {
-            if (camera) {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-            }
-            if (renderer) {
-                renderer.setSize(window.innerWidth, window.innerHeight);
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            
+            if (arToolkitSource) {
+                arToolkitSource.onResizeElement();
+                arToolkitSource.onResize();
+                if (arToolkitContext) {
+                    arToolkitContext.update(arToolkitSource.domElement);
+                }
             }
         }
 
-        // Обработчик кнопки запуска
-        startBtn.addEventListener('click', startARSession);
-
         // Инициализация при загрузке страницы
-        window.addEventListener('load', async () => {
-            await checkXRSupport();
-            initScene();
+        window.addEventListener('load', () => {
+            init();
         });
     </script>
 </body>
 </html>
+
+
+
